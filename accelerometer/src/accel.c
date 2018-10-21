@@ -29,7 +29,7 @@ static void acc_work_func(struct work_struct *work)
 	time = get_monotonic_coarse(); 
 	nt = time.tv_sec*1000000000LL+time.tv_nsec;
 	
-	cxt->acc_data.get_data(&x,&y,&z,&status);
+	err = cxt->acc_data.get_data(&x,&y,&z,&status);
 
 	if(err)
 	{
