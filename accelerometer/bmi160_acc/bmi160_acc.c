@@ -49,7 +49,22 @@
 #include "bmi160_acc.h"
 #include <linux/hwmsen_helper.h>
 
-#include <linux/proc_fs.h>
+//shihaobin@yulong.com add for compitable begin 20150414
+#include <linux/batch.h>
+//shihaobin@yulong.com add for compitable end 20150414
+
+//shihaobin add for acc_calibration begin 20150330
+#include <linux/wakelock.h>
+
+#define NAND_FLASH_WR_RD_SIZE 10
+
+extern int read_acc_ps_cal_data_from_flash(unsigned int offset, char* output, int counts);
+extern int write_acc_ps_cal_data_to_flash(unsigned int offset, char* input, int counts);
+static int yulong_accel_Calibration(struct i2c_client *client, char *buf, int bufsize,int count,unsigned long cal_arg);
+//static int yulong_accel_Calibration(struct i2c_client *client, char *buf, int bufsize,int count);
+static int yulong_acc_ReadCalibration(struct i2c_client *client);
+//shihaobin add for acc_calibration end 20150330
+
 /*----------------------------------------------------------------------------*/
 #define DEBUG 0
 #define MISC_FOR_DAEMON
@@ -61,7 +76,7 @@
 #define BMM050_DEFAULT_DELAY	100
 #define CALIBRATION_DATA_SIZE	12
 
-#define  STEP_SENSOR
+extern struct acc_hw* bmi160_get_cust_acc_hw(void); //shihaobin@yulong.com add for compatible 20150410
 
 /*----------------------------------------------------------------------------*/
 /*
@@ -234,7 +249,7 @@ static struct bmi160_acc_i2c_data *obj_i2c_data = NULL;
 static bool sensor_power = true;
 static GSENSOR_VECTOR3D gsensor_gain;
 
-static int bmi160_acc_init_flag =-1; // 0<==>OK -1 <==> fail
+extern int bmi160_acc_init_flag; // 0<==>OK -1 <==> fail
 
 /*----------------------------------------------------------------------------*/
 #define GSE_TAG                  "[Gsensor] "
@@ -378,12 +393,14 @@ static int bma_i2c_write_block(struct i2c_client *client, u8 addr,
 	return err;
 }
 
-bool __attribute__((weak)) hwPowerOn(MT65XX_POWER powerId, MT65XX_POWER_VOLTAGE powerVolt, char *mode_name)
+//bool __attribute__((weak)) hwPowerOn(MT65XX_POWER powerId, MT65XX_POWER_VOLTAGE powerVolt, char *mode_name)
+bool __attribute__((weak)) acc_hwPowerOn(MT65XX_POWER powerId, MT65XX_POWER_VOLTAGE powerVolt, char *mode_name)
 {
 	return 0;
 }
 
-bool __attribute__((weak)) hwPowerDown(MT65XX_POWER powerId, char *mode_name)
+//bool __attribute__((weak)) hwPowerDown(MT65XX_POWER powerId, char *mode_name)
+bool __attribute__((weak)) acc_hwPowerDown(MT65XX_POWER powerId, char *mode_name)
 {
 	return 0;
 }
@@ -402,14 +419,14 @@ static void BMI160_ACC_power(struct acc_hw *hw, unsigned int on)
 		}
 		else if(on)	// power on
 		{
-			if(!hwPowerOn(hw->power_id, hw->power_vol, "BMI160_ACC"))
+			if(!acc_hwPowerOn(hw->power_id, hw->power_vol, "BMI160_ACC"))
 			{
 				GSE_ERR("power on fails!!\n");
 			}
 		}
 		else	// power off
 		{
-			if (!hwPowerDown(hw->power_id, "BMI160_ACC"))
+			if (!acc_hwPowerDown(hw->power_id, "BMI160_ACC"))
 			{
 				GSE_ERR("power off fail!!\n");
 			}
@@ -618,38 +635,48 @@ static int BMI160_ACC_ReadCalibrationEx(struct i2c_client *client, int act[BMI16
 /*----------------------------------------------------------------------------*/
 static int BMI160_ACC_WriteCalibration(struct i2c_client *client, int dat[BMI160_ACC_AXES_NUM])
 {
-	struct bmi160_acc_i2c_data *obj = obj_i2c_data;
-	int err = 0;
-	int cali[BMI160_ACC_AXES_NUM], raw[BMI160_ACC_AXES_NUM];
+		struct bmi160_acc_i2c_data *obj = obj_i2c_data;
+		int err = 0;
+		//shihaobin@yulong.com modify for debug 20150416 begin
+		int cali[BMI160_ACC_AXES_NUM] = {0};
+		int raw[BMI160_ACC_AXES_NUM] = {0};
+
+
+
 #ifndef SW_CALIBRATION
 	int lsb = bmi160_acc_offset_resolution.sensitivity;
 	int divisor = obj->reso->sensitivity/lsb;
 #endif
 
-	err = BMI160_ACC_ReadCalibrationEx(client, cali, raw);
-	if(err)	/*offset will be updated in obj->offset*/
-	{
-		GSE_ERR("read offset fail, %d\n", err);
-		return err;
-	}
+		/*if(err = BMI160_ACC_ReadCalibrationEx(client, cali, raw))
+		{
+				GSE_ERR("read offset fail, %d\n", err);
+				return err;
+		}*/
+		//shihaobin@yulong.com modify for debug 20150416 end
+		GSE_LOG("OLDOFF: (%+3d %+3d %+3d): (%+3d %+3d %+3d) / (%+3d %+3d %+3d)\n",
+				raw[BMI160_ACC_AXIS_X], raw[BMI160_ACC_AXIS_Y], raw[BMI160_ACC_AXIS_Z],
+				obj->offset[BMI160_ACC_AXIS_X], obj->offset[BMI160_ACC_AXIS_Y], obj->offset[BMI160_ACC_AXIS_Z],
+				obj->cali_sw[BMI160_ACC_AXIS_X], obj->cali_sw[BMI160_ACC_AXIS_Y], obj->cali_sw[BMI160_ACC_AXIS_Z]);
 
-	GSE_LOG("OLDOFF: (%+3d %+3d %+3d): (%+3d %+3d %+3d) / (%+3d %+3d %+3d)\n",
-		raw[BMI160_ACC_AXIS_X], raw[BMI160_ACC_AXIS_Y], raw[BMI160_ACC_AXIS_Z],
-		obj->offset[BMI160_ACC_AXIS_X], obj->offset[BMI160_ACC_AXIS_Y], obj->offset[BMI160_ACC_AXIS_Z],
-		obj->cali_sw[BMI160_ACC_AXIS_X], obj->cali_sw[BMI160_ACC_AXIS_Y], obj->cali_sw[BMI160_ACC_AXIS_Z]);
 
 	/*calculate the real offset expected by caller*/
 	cali[BMI160_ACC_AXIS_X] += dat[BMI160_ACC_AXIS_X];
 	cali[BMI160_ACC_AXIS_Y] += dat[BMI160_ACC_AXIS_Y];
 	cali[BMI160_ACC_AXIS_Z] += dat[BMI160_ACC_AXIS_Z];
 
-	GSE_LOG("UPDATE: (%+3d %+3d %+3d)\n",
-		dat[BMI160_ACC_AXIS_X], dat[BMI160_ACC_AXIS_Y], dat[BMI160_ACC_AXIS_Z]);
+		printk("yl_sensor_debug cali[0-2]= %d, %d, %d,  data[0-2]=%d, %d, %d\n",cali[BMI160_ACC_AXIS_X],cali[BMI160_ACC_AXIS_Y],cali[BMI160_ACC_AXIS_Z],dat[BMI160_ACC_AXIS_X],dat[BMI160_ACC_AXIS_Y],dat[BMI160_ACC_AXIS_Z]);
+		printk("yl_sensor_debug cali sign obj->cvt.sign[0-2]=%d %d %d\n", obj->cvt.sign[BMI160_ACC_AXIS_X], obj->cvt.sign[BMI160_ACC_AXIS_Y], obj->cvt.sign[BMI160_ACC_AXIS_Z]);
+
+		GSE_LOG("UPDATE: (%+3d %+3d %+3d)\n",
+				dat[BMI160_ACC_AXIS_X], dat[BMI160_ACC_AXIS_Y], dat[BMI160_ACC_AXIS_Z]);
 
 #ifdef SW_CALIBRATION
-	obj->cali_sw[BMI160_ACC_AXIS_X] = obj->cvt.sign[BMI160_ACC_AXIS_X]*(cali[obj->cvt.map[BMI160_ACC_AXIS_X]]);
-	obj->cali_sw[BMI160_ACC_AXIS_Y] = obj->cvt.sign[BMI160_ACC_AXIS_Y]*(cali[obj->cvt.map[BMI160_ACC_AXIS_Y]]);
-	obj->cali_sw[BMI160_ACC_AXIS_Z] = obj->cvt.sign[BMI160_ACC_AXIS_Z]*(cali[obj->cvt.map[BMI160_ACC_AXIS_Z]]);
+		obj->cali_sw[BMI160_ACC_AXIS_X] = obj->cvt.sign[BMI160_ACC_AXIS_X]*(cali[obj->cvt.map[BMI160_ACC_AXIS_X]]);
+		obj->cali_sw[BMI160_ACC_AXIS_Y] = obj->cvt.sign[BMI160_ACC_AXIS_Y]*(cali[obj->cvt.map[BMI160_ACC_AXIS_Y]]);
+		obj->cali_sw[BMI160_ACC_AXIS_Z] = obj->cvt.sign[BMI160_ACC_AXIS_Z]*(cali[obj->cvt.map[BMI160_ACC_AXIS_Z]]);
+
+		printk("yl_sensor_debug cali_sw[0-2]=%d, %d, %d\n",obj->cali_sw[BMI160_ACC_AXIS_X],obj->cali_sw[BMI160_ACC_AXIS_Y],obj->cali_sw[BMI160_ACC_AXIS_Z]);
 #else
 	obj->offset[BMI160_ACC_AXIS_X] = (s8)(obj->cvt.sign[BMI160_ACC_AXIS_X]*(cali[obj->cvt.map[BMI160_ACC_AXIS_X]])/(divisor));
 	obj->offset[BMI160_ACC_AXIS_Y] = (s8)(obj->cvt.sign[BMI160_ACC_AXIS_Y]*(cali[obj->cvt.map[BMI160_ACC_AXIS_Y]])/(divisor));
@@ -708,22 +735,13 @@ static int BMI160_ACC_CheckDeviceID(struct i2c_client *client)
 
 	return BMI160_ACC_SUCCESS;
 }
+
 /*----------------------------------------------------------------------------*/
-#ifdef STEP_SENSOR
-bool step_power = false;
-#endif
 static int BMI160_ACC_SetPowerMode(struct i2c_client *client, bool enable)
 {
 	u8 databuf[2] = {0};
 	int res = 0;
 	struct bmi160_acc_i2c_data *obj = obj_i2c_data;
-#ifdef STEP_SENSOR
-       if(step_power )
-	{
-		GSE_LOG("Sensor power status is newest!\n");
-		return BMI160_ACC_SUCCESS;
-	}
-#endif	   
 	if(enable == sensor_power )
 	{
 		GSE_LOG("Sensor power status is newest!\n");
@@ -883,75 +901,6 @@ static int BMI160_ACC_SetIntEnable(struct i2c_client *client, u8 intenable)
 	return BMI160_ACC_SUCCESS;
 }
 
-#ifdef STEP_SENSOR
-//heyong add reset ic
-#define IC_MODEM_SWITCH_PROC_NAME "steps_reset"
- #define IC_PROC_NAME "stepsreset"
- int steps_reset = 0;
- static int reset_read(char *buf, char **start, off_t off, int count, int *eof, void *data)
-{
-    int len = 0;
-    char *p = buf;
-    
-    p += sprintf(p, "%d\n", steps_reset);
-    
-    *start = buf + off;
-    
-    len = p - buf;
-    if (len > off)
-        len -= off;
-    else
-        len = 0;
-    
-    return len < count ? len  : count;
-}
- 
-static int reset_write(struct file *file, const char *buffer, unsigned long count, void *data)
-{
-	char tmp_buf[11] = {0};
-	uint32_t copysize;
-	int write_data = 0;
-	copysize = (count < (sizeof(tmp_buf) - 1)) ? count : (sizeof(tmp_buf) - 1);
-	if (copy_from_user(tmp_buf, buffer, copysize)) {
-        return -EFAULT;
-    }
-
-	if (sscanf(tmp_buf, "%d", &write_data) != 1) {
-		return -EFAULT;
-	}
-     
-	  steps_reset = write_data;
-	return count;
-}
-
- void reset_ic(void)
- {    
-    int ret_device_file = 0;
-    struct proc_dir_entry *entry = NULL;
-    struct proc_dir_entry *step_dir = NULL;
-    
-    step_dir = proc_mkdir(IC_PROC_NAME, NULL);
-    if (!step_dir)
-    {
-       
-       //printk("bmi160 step === failed");
-    }
-    else
-    {
-       
-       entry = create_proc_entry(IC_MODEM_SWITCH_PROC_NAME, 0777, step_dir);
-        if (entry)
-        {
-            entry->read_proc = reset_read;
-            entry->write_proc = reset_write;
-        }
-    }   
-}
-
- 
-//heyong end
-#endif
-
 /*----------------------------------------------------------------------------*/
 static int bmi160_acc_init_client(struct i2c_client *client, int reset_cali)
 {
@@ -964,9 +913,6 @@ static int bmi160_acc_init_client(struct i2c_client *client, int reset_cali)
 	{
 		return res;
 	}
-#ifdef STEP_SENSOR
-	reset_ic();
-#endif
 	GSE_LOG("BMI160_ACC_CheckDeviceID ok \n");
 
 	res = BMI160_ACC_SetBWRate(client, BMI160_ACCEL_ODR_200HZ);
@@ -1104,6 +1050,188 @@ static int BMI160_ACC_CompassReadData(struct i2c_client *client, char *buf, int 
 
 	return 0;
 }
+
+//shihaobin@yulong.com add for sensor calibration begin 20150330
+static int yulong_accel_Calibration(struct i2c_client *client, char *buf, int bufsize,int count,unsigned long cal_arg)
+//static int yulong_accel_Calibration(struct i2c_client *client, char *buf, int bufsize,int count)
+{
+		int ret = 0;
+		char databuf[6];
+		char i;
+		int data[3];
+		//char tmp[1];
+		int cali[3];
+		long xavg = 0, yavg = 0, zavg = 0;
+		char tempbuf[NAND_FLASH_WR_RD_SIZE];
+		struct bmi160_acc_i2c_data *obj = obj_i2c_data;    //shihaobin@yulong.com add for calibration
+				//add by wangyufei begin  20140630
+		//int ret = 0;
+		struct acc_offset acc_cal_data;
+		struct acc_offset *acc_cal_ptr = &acc_cal_data;
+		//add end
+	#ifdef STEP_SENSOR
+	reset_ic();
+#endif	//struct bmi160_acc_i2c_data *obj = i2c_get_clientdata(client);
+
+		BMI160_ACC_SetPowerMode(client, true);
+		msleep(50);
+		/*if (true != obj->enable)
+		{
+				GSE_ERR("ACC ic is not enable\n");
+				BMI160_ACC_SetPowerMode(client, true);
+				msleep(50);
+		}*/
+
+		for (i = 0; i < count; i++)
+		{
+				if(hwmsen_read_block(client, BMI160_ACC_DATA_REG_L_X, databuf, 6))
+				{
+						GSE_ERR("bmi160_acc read accscope data  error\n");
+						return -2;
+				}
+				else
+				{
+						obj->data[BMI160_ACC_AXIS_X] = ((s16)((databuf[BMI160_ACC_AXIS_X*2]) | (databuf[BMI160_ACC_AXIS_X*2+1] << 8)));
+						obj->data[BMI160_ACC_AXIS_Y] = ((s16)((databuf[BMI160_ACC_AXIS_Y*2]) | (databuf[BMI160_ACC_AXIS_Y*2+1] << 8)));
+						obj->data[BMI160_ACC_AXIS_Z] = ((s16)((databuf[BMI160_ACC_AXIS_Z*2]) | (databuf[BMI160_ACC_AXIS_Z*2+1] << 8)));
+
+						//printk("shihaobin (%d),obj->data[BMI160_ACC_AXIS_X]is %d,obj->data[BMI160_ACC_AXIS_Y] is %d,obj->data[BMI160_ACC_AXIS_Z] is %d\n",__LINE__,obj->data[BMI160_ACC_AXIS_X],obj->data[BMI160_ACC_AXIS_Y],obj->data[BMI160_ACC_AXIS_Z]);
+						//printk("(%d),obj->cali_sw[BMI160_ACC_AXIS_X]is %d,obj->cali_sw[BMI160_ACC_AXIS_Y] is %d,obj->cali_sw[BMI160_ACC_AXIS_Z] is %d\n",__LINE__,obj->cali_sw[BMI160_ACC_AXIS_X],obj->cali_sw[BMI160_ACC_AXIS_Y],obj->cali_sw[BMI160_ACC_AXIS_Z]);
+
+						obj->data[BMI160_ACC_AXIS_X] = obj->data[BMI160_ACC_AXIS_X] + obj->cali_sw[BMI160_ACC_AXIS_X];
+						obj->data[BMI160_ACC_AXIS_Y] = obj->data[BMI160_ACC_AXIS_Y] + obj->cali_sw[BMI160_ACC_AXIS_Y];
+						obj->data[BMI160_ACC_AXIS_Z] = obj->data[BMI160_ACC_AXIS_Z] + obj->cali_sw[BMI160_ACC_AXIS_Z];
+						/*remap coordinate*/
+						data[BMI160_ACC_AXIS_X] = obj->cvt.sign[BMI160_ACC_AXIS_X]*obj->data[BMI160_ACC_AXIS_X];
+						data[BMI160_ACC_AXIS_Y] = obj->cvt.sign[BMI160_ACC_AXIS_Y]*obj->data[BMI160_ACC_AXIS_Y];
+						data[BMI160_ACC_AXIS_Z] = obj->cvt.sign[BMI160_ACC_AXIS_Z]*obj->data[BMI160_ACC_AXIS_Z];
+
+						////Out put the mg
+						data[BMI160_ACC_AXIS_X] = data[BMI160_ACC_AXIS_X] * GRAVITY_EARTH_1000 / 16384;
+						data[BMI160_ACC_AXIS_Y] = data[BMI160_ACC_AXIS_Y] * GRAVITY_EARTH_1000 / 16384;
+						data[BMI160_ACC_AXIS_Z] = data[BMI160_ACC_AXIS_Z] * GRAVITY_EARTH_1000 / 16384;
+
+						printk("yl_sensor_debug (%d),data[BMI160_ACC_AXIS_X]is %d,data[BMI160_ACC_AXIS_Y] is %d,data[BMI160_ACC_AXIS_Z] is %d\n",__LINE__,data[BMI160_ACC_AXIS_X],data[BMI160_ACC_AXIS_Y],data[BMI160_ACC_AXIS_Z]);
+
+						xavg += data[BMI160_ACC_AXIS_X];
+						yavg += data[BMI160_ACC_AXIS_Y];
+						zavg += data[BMI160_ACC_AXIS_Z];
+
+				}
+		}
+		//printk("(%d),xavg is %d,Yavg is %d,Zavg is %d\n",__LINE__,xavg,xavg,xavg);
+		cali[BMI160_ACC_AXIS_X] = xavg/count;
+		cali[BMI160_ACC_AXIS_Y] = yavg/count;
+		cali[BMI160_ACC_AXIS_Z] = zavg/count;
+		printk("(%d),calix is %d,caliy is %d,caliz is %d\n",__LINE__,cali[BMI160_ACC_AXIS_X],cali[BMI160_ACC_AXIS_Y],cali[BMI160_ACC_AXIS_Z]);
+		cali[BMI160_ACC_AXIS_X] = 0-cali[BMI160_ACC_AXIS_X];
+		cali[BMI160_ACC_AXIS_Y] = 0-cali[BMI160_ACC_AXIS_Y];
+		cali[BMI160_ACC_AXIS_Z] = 9807-cali[BMI160_ACC_AXIS_Z];
+		printk("yl_sensor_debug (%d),calix is %d,caliy is %d,caliz is %d\n",__LINE__,cali[BMI160_ACC_AXIS_X],cali[BMI160_ACC_AXIS_Y],cali[BMI160_ACC_AXIS_Z]);
+
+		/*printk("Yulong cali[BMI160_ACC_AXIS_X]=%d, obj->reso->sensitivity=%d,GRAVITY_EARTH_1000=%d\n",cali[BMI160_ACC_AXIS_X], obj->reso->sensitivity, GRAVITY_EARTH_1000);
+		printk("Yulong cali[BMI160_ACC_AXIS_Y]=%d, obj->reso->sensitivity=%d,GRAVITY_EARTH_1000=%d\n",cali[BMI160_ACC_AXIS_Y], obj->reso->sensitivity, GRAVITY_EARTH_1000);
+		printk("Yulong cali[BMI160_ACC_AXIS_Z]=%d, obj->reso->sensitivity=%d,GRAVITY_EARTH_1000=%d\n",cali[BMI160_ACC_AXIS_Z], obj->reso->sensitivity, GRAVITY_EARTH_1000);*/
+
+		/*cali[BMI160_ACC_AXIS_X] = cali[BMI160_ACC_AXIS_X] * obj->reso->sensitivity / GRAVITY_EARTH_1000;
+		cali[BMI160_ACC_AXIS_Y] = cali[BMI160_ACC_AXIS_Y] * obj->reso->sensitivity / GRAVITY_EARTH_1000;
+		cali[BMI160_ACC_AXIS_Z] = cali[BMI160_ACC_AXIS_Z] * obj->reso->sensitivity / GRAVITY_EARTH_1000;*/
+
+		ret = BMI160_ACC_WriteCalibration(client, cali);
+		//GSE_LOG("fwq GSENSOR_IOCTL_SET_CALI!!xavg =%d,yavg =%d,zavg =%d \n",xavg,yavg,zavg);
+		GSE_LOG("fwq GSENSOR_IOCTL_SET_CALI!!obj->reso->sensitivity = %d,cali[BMI160_ACC_AXIS_X] =%d,scali[BMI160_ACC_AXIS_X] =%d,cali[BMI160_ACC_AXIS_X] =%d \n",obj->reso->sensitivity,cali[BMI160_ACC_AXIS_X],cali[BMI160_ACC_AXIS_Y],cali[BMI160_ACC_AXIS_Z]);
+
+
+		((struct acc_offset *)acc_cal_ptr)->x = obj->cali_sw[BMI160_ACC_AXIS_X];
+		((struct acc_offset *)acc_cal_ptr)->y = obj->cali_sw[BMI160_ACC_AXIS_Y];
+		((struct acc_offset *)acc_cal_ptr)->z = obj->cali_sw[BMI160_ACC_AXIS_Z];
+		((struct acc_offset *)acc_cal_ptr)->key = ret ? 2 : 1;
+
+		//printk("(%d),obj->cali_sw[BMI160_ACC_AXIS_X] is %d,obj->cali_sw[BMI160_ACC_AXIS_Y] is %d,obj->cali_sw[BMI160_ACC_AXIS_Z] is %d\n",__LINE__,obj->cali_sw[BMI160_ACC_AXIS_X],obj->cali_sw[BMI160_ACC_AXIS_Y],obj->cali_sw[BMI160_ACC_AXIS_Z]);
+
+		printk(KERN_INFO "%s write: x = %d\n",  __func__, ((struct acc_offset *)acc_cal_ptr)->x);
+		printk(KERN_INFO "%s write: y = %d\n",  __func__, ((struct acc_offset *)acc_cal_ptr)->y);
+		printk(KERN_INFO "%s write: z = %d\n",  __func__,((struct acc_offset *)acc_cal_ptr)->z);
+		printk(KERN_INFO "%s write: key = %d\n",  __func__,((struct acc_offset *)acc_cal_ptr)->key);
+		memset(tempbuf, 0, sizeof(tempbuf));
+
+		tempbuf[0] = 0x01;
+		tempbuf[1] = (obj->cali_sw[BMI160_ACC_AXIS_X] & 0xff00) >> 8;
+		tempbuf[2] = obj->cali_sw[BMI160_ACC_AXIS_X] & 0x00ff;
+		tempbuf[3] = (obj->cali_sw[BMI160_ACC_AXIS_Y] & 0xff00) >> 8;
+		tempbuf[4] = obj->cali_sw[BMI160_ACC_AXIS_Y] & 0x00ff;
+		tempbuf[5] = (obj->cali_sw[BMI160_ACC_AXIS_Z] & 0xff00) >> 8;
+		tempbuf[6] = obj->cali_sw[BMI160_ACC_AXIS_Z] & 0x00ff;
+
+		if(copy_to_user((struct acc_offset *)cal_arg, acc_cal_ptr, sizeof(acc_cal_data)))
+		{
+				printk("%s:  Calibrate copy_to_user failed!\n", __func__);
+		}
+		#if 0
+		printk("(%s) TEMPBUF is (%d),(%d),(%d),(%d),(%d),(%d),(%d)\n",
+		__LINE__,tempbuf[0],tempbuf[1],tempbuf[2],tempbuf[3],tempbuf[4],tempbuf[5],tempbuf[6] );
+		printk("(%s) TEMPBUF is (%x),(%x),(%x),(%x),(%x),(%x),(%x)\n",
+				__LINE__,tempbuf[0],tempbuf[1],tempbuf[2],tempbuf[3],tempbuf[4],tempbuf[5],tempbuf[6] );
+		#endif
+
+		printk(" wangyufei_write _acc_ps_cal_data  %s\n", __func__);
+		if(write_acc_ps_cal_data_to_flash(16, tempbuf, NAND_FLASH_WR_RD_SIZE)<0)
+				printk("Create ACC  calibration file error!!");
+		else
+				printk("Create ACC  calibration file Success!!");
+
+		return ret;
+
+}
+
+int read_acc_ps_cal_data_from_flash(unsigned int offset, char* output, int counts)
+{
+   unsigned char CrossTalk[512] ="PRODUCTLINE";
+   int size = sizeof(CrossTalk);
+   int ret;
+
+    return 0;
+}
+EXPORT_SYMBOL_GPL(read_acc_ps_cal_data_from_flash);
+
+int write_acc_ps_cal_data_to_flash(unsigned int offset, char* input, int counts)
+{
+   unsigned char CrossTalk[512] ="PRODUCTLINE";
+   int size  = sizeof(CrossTalk);
+   int ret;
+
+    return 0;
+}
+EXPORT_SYMBOL_GPL(write_acc_ps_cal_data_to_flash);
+
+
+static int yulong_acc_ReadCalibration(struct i2c_client *client)
+{
+		char tempbuf[NAND_FLASH_WR_RD_SIZE];
+		//char i;
+		struct bmi160_acc_i2c_data *obj = i2c_get_clientdata(client);
+
+		printk("yl_sensor_debug in yulong acc_read_calibration!\n");
+
+		if(read_acc_ps_cal_data_from_flash(16, tempbuf, NAND_FLASH_WR_RD_SIZE)<0)
+				printk("ACC use Default CALI , cali_sw[BMI160_ACC_AXIS_X] = %d , cali_sw[BMI160_ACC_AXIS_Y] = %d, cali_sw[BMI160_ACC_AXIS_Z] = %d\n",
+				obj->cali_sw[BMI160_ACC_AXIS_X],obj->cali_sw[BMI160_ACC_AXIS_Y],obj->cali_sw[BMI160_ACC_AXIS_Z]);
+		else{
+				obj->cali_sw[BMI160_ACC_AXIS_X] = (s16)((tempbuf[1]<<8)|tempbuf[2]);
+				obj->cali_sw[BMI160_ACC_AXIS_Y] = (s16)((tempbuf[3]<<8)|tempbuf[4]);
+				obj->cali_sw[BMI160_ACC_AXIS_Z] = (s16)((tempbuf[5]<<8)|tempbuf[6]);
+
+				printk("ACC use yulong CALI ,tempbuf is %d,%d,%d,%d,%d,%d,%d ",
+						tempbuf[0],tempbuf[1],tempbuf[2],tempbuf[3],tempbuf[4],tempbuf[5],tempbuf[6]);
+
+				printk("ACC use yulong CALI , cali_sw[MPU6050C_ACC_AXIS_X] = %d , cali_sw[MPU6050C_ACC_AXIS_Y] = %d, cali_sw[MPU6050C_ACC_AXIS_Z] = %d\n",
+						obj->cali_sw[BMI160_ACC_AXIS_X],obj->cali_sw[BMI160_ACC_AXIS_Y],obj->cali_sw[BMI160_ACC_AXIS_Z]);
+
+		}
+		return 1;
+}
+//shihaobin@yulong.com add for sensor calibration end 20150330
+
 /*----------------------------------------------------------------------------*/
 static int BMI160_ACC_ReadSensorData(struct i2c_client *client, char *buf, int bufsize)
 {
@@ -1112,6 +1240,7 @@ static int BMI160_ACC_ReadSensorData(struct i2c_client *client, char *buf, int b
 	int acc[BMI160_ACC_AXES_NUM];
 	int res = 0;
 	s16 databuf[BMI160_ACC_AXES_NUM];
+	static uint8_t bmi160_acc_enable_flag = 0;  //shihaobin add read calibration data 20150330
 	//memset(databuf, 0, sizeof(u8)*10);
 
 	if(NULL == buf)
@@ -1123,6 +1252,14 @@ static int BMI160_ACC_ReadSensorData(struct i2c_client *client, char *buf, int b
 		*buf = 0;
 		return -2;
 	}
+
+	//shihaobin add for read calibration data when first enable sensor begin 20150330
+	if (0 == bmi160_acc_enable_flag)
+	{
+		bmi160_acc_enable_flag = 1;
+		yulong_acc_ReadCalibration(bmi160_acc_i2c_client);
+	}
+	//shihaobin add for read calibration data when first enable sensor end 20150330
 
 	if(sensor_power == FALSE)
 	{
@@ -1142,9 +1279,15 @@ static int BMI160_ACC_ReadSensorData(struct i2c_client *client, char *buf, int b
 	else
 	{
 		//GSE_LOG("raw data x=%d, y=%d, z=%d \n",obj->data[BMI160_ACC_AXIS_X],obj->data[BMI160_ACC_AXIS_Y],obj->data[BMI160_ACC_AXIS_Z]);
-		databuf[BMI160_ACC_AXIS_X] += obj->cali_sw[BMI160_ACC_AXIS_X];
+		//shihaobin add for debug 20150416 begin
+		databuf[BMI160_ACC_AXIS_X] += (obj->cali_sw[BMI160_ACC_AXIS_X]) * 16384 / GRAVITY_EARTH_1000;
+		databuf[BMI160_ACC_AXIS_Y] += (obj->cali_sw[BMI160_ACC_AXIS_Y]) * 16384 / GRAVITY_EARTH_1000;
+		databuf[BMI160_ACC_AXIS_Z] += (obj->cali_sw[BMI160_ACC_AXIS_Z]) * 16384 / GRAVITY_EARTH_1000;
+		//shihaobin add for debug 20150416 end
+
+		/*databuf[BMI160_ACC_AXIS_X] += obj->cali_sw[BMI160_ACC_AXIS_X];
 		databuf[BMI160_ACC_AXIS_Y] += obj->cali_sw[BMI160_ACC_AXIS_Y];
-		databuf[BMI160_ACC_AXIS_Z] += obj->cali_sw[BMI160_ACC_AXIS_Z];
+		databuf[BMI160_ACC_AXIS_Z] += obj->cali_sw[BMI160_ACC_AXIS_Z];*/
 
 		//GSE_LOG("cali_sw x=%d, y=%d, z=%d \n",obj->cali_sw[BMI160_ACC_AXIS_X],obj->cali_sw[BMI160_ACC_AXIS_Y],obj->cali_sw[BMI160_ACC_AXIS_Z]);
 
@@ -1458,7 +1601,7 @@ static ssize_t store_cpsopmode_value(struct device_driver *ddri, const char *buf
 	}
 	else if (bmi160_acc_set_mode(bmi160_acc_i2c_client, (unsigned char) data) < 0)
 	{
-		GSE_ERR("invalid content: '%s', length = %d\n", buf, count);
+		GSE_ERR("invalid content: '%s', length = %lu\n", buf, count);
 	}
 
 	return count;
@@ -1498,7 +1641,7 @@ static ssize_t store_cpsrange_value(struct device_driver *ddri, const char *buf,
 	}
 	if (bmi160_acc_set_range(bmi160_acc_i2c_client, (unsigned char) data) < 0)
 	{
-		GSE_ERR("invalid content: '%s', length = %d\n", buf, count);
+		GSE_ERR("invalid content: '%s', length = %lu\n", buf, count);
 	}
 
 	return count;
@@ -1510,6 +1653,21 @@ g sensor bandwidth for compass tilt compensation
 static ssize_t show_cpsbandwidth_value(struct device_driver *ddri, char *buf)
 {
 	unsigned char data;
+	//shihaobin@yulong.com add for read chip filter value begin 20150417
+	static int beg = 0x40;
+	int filter_value = 0;
+	int i2c_rea_err = 0;
+	
+	struct i2c_msg filter_msgs[2] = {
+		{
+			.addr = obj_i2c_data->client->addr,   .flags = 0,
+			.len = 1,               .buf = &beg
+		},
+		{
+			.addr = obj_i2c_data->client->addr,   .flags = I2C_M_RD,
+			.len = 1,               .buf = &filter_value
+	}
+		};
 
 	if (bmi160_acc_get_bandwidth(bmi160_acc_i2c_client, &data) < 0)
 	{
@@ -1517,8 +1675,11 @@ static ssize_t show_cpsbandwidth_value(struct device_driver *ddri, char *buf)
 	}
 	else
 	{
-		return sprintf(buf, "%d\n", data);
+		i2c_rea_err = i2c_transfer(obj_i2c_data->client->adapter, filter_msgs, sizeof(filter_msgs)/sizeof(filter_msgs[0]));
+		
+		return sprintf(buf, "%d %d\n", data, filter_value);
 	}
+	//shihaobin@yulong.com add for read chip filter value end 20150417
 }
 
 /*----------------------------------------------------------------------------*/
@@ -1742,7 +1903,7 @@ static ssize_t store_trace_value(struct device_driver *ddri, const char *buf, si
 	}
 	else
 	{
-		GSE_ERR("invalid content: '%s', length = %d\n", buf, count);
+		GSE_ERR("invalid content: '%s', length = %lu\n", buf, count);
 	}
 
 	return count;
@@ -2361,27 +2522,10 @@ static ssize_t store_layout_value(struct device_driver *ddri, const char *buf, s
 	{
 		GSE_ERR( "invalid format = '%s'\n", buf);
 	}
-	
-	return count;            
-}
-#ifdef STEP_SENSOR
-///heyong 
-static int Step_SetPowerMode(struct i2c_client *client, bool enable);
-static ssize_t show_stepsreset_value(struct device_driver *ddri, char *buf)
-{
-	return 0;
-}
-/*----------------------------------------------------------------------------*/
-int  m_is_reset = 0;
-static ssize_t store_stepsreset_value(struct device_driver *ddri, const char *buf, size_t count)
-{
-	struct i2c_client *client = bmi160_acc_i2c_client;       
-	printk("store_stepsreset_value = %s\n", buf);
-	m_is_reset =1;
-       Step_SetPowerMode(client,false);	
+
 	return count;
 }
-#endif
+
 /*----------------------------------------------------------------------------*/
 static DRIVER_ATTR(chipinfo,   S_IWUSR | S_IRUGO, show_chipinfo_value,      NULL);
 static DRIVER_ATTR(cpsdata, 	 S_IWUSR | S_IRUGO, show_cpsdata_value,    NULL);
@@ -2399,7 +2543,6 @@ static DRIVER_ATTR(fifo_bytecount, S_IRUGO | S_IWUSR, bmi160_fifo_bytecount_show
 static DRIVER_ATTR(fifo_data_sel, S_IRUGO | S_IWUSR, bmi160_fifo_data_sel_show, bmi160_fifo_data_sel_store);
 static DRIVER_ATTR(fifo_data_frame, S_IRUGO, bmi160_fifo_data_out_frame_show, NULL);
 static DRIVER_ATTR(layout,      S_IRUGO | S_IWUSR, show_layout_value, store_layout_value );
-static DRIVER_ATTR(stepsreset,      0777, show_stepsreset_value,         store_stepsreset_value);
 /*----------------------------------------------------------------------------*/
 static struct driver_attribute *bmi160_acc_attr_list[] = {
 	&driver_attr_chipinfo,     /*chip information*/
@@ -2418,7 +2561,6 @@ static struct driver_attribute *bmi160_acc_attr_list[] = {
 	&driver_attr_fifo_data_sel,
 	&driver_attr_fifo_data_frame,
 	&driver_attr_layout,
-	&driver_attr_stepsreset,
 };
 /*----------------------------------------------------------------------------*/
 static int bmi160_acc_create_attr(struct device_driver *driver)
@@ -2458,236 +2600,6 @@ static int bmi160_acc_delete_attr(struct device_driver *driver)
 
 	return err;
 }
-
-//
-
-#ifdef STEP_SENSOR
-static int Step_init(struct i2c_client *client)
-{             
-		int res = 0;
-	printk(" heyong Step_init = %d\n", res);
-		res = hwmsen_write_byte(client, 0x7e, 0x11);//12 low power 11 normal
-		if(res != 0) 
-		{
-			return res;
-		}
-		mdelay(100);
-		res = hwmsen_write_byte(client, 0x7a, 0x15);
-		if(res != 0) 
-		{
-			return res;
-		}
-		mdelay(100);
-		res = hwmsen_write_byte(client, 0x7b, 0x0b);
-		if(res != 0) 
-		{
-			return res;
-		}
-		mdelay(100);
-		
-		return 0;	  
-}
-
-
-static int Step_SetPowerMode(struct i2c_client *client, bool enable)
-{
-	u8 databuf[2];    
-	int res = 0;
-	u8 addr = 0x11;
-	struct bmi160_acc_i2c_data *obj = obj_i2c_data;
-	
-	printk("heyong qma8961  set power %d,%d,%d ,%d\n ",enable,step_power,steps_reset,m_is_reset);
-
-	if(steps_reset)
-	     enable = false;
-	else
-	     enable = true;
-		///return 0;
-	if(m_is_reset)
-	{
-	 enable = false;
-	 m_is_reset = 0;
-	}
-	if(enable == step_power )
-	{
-		GSE_LOG("Sensor power status is newest!\n");
-		return 0;
-	}
-
-	//init step
-	step_power = enable;
-
-	
-if (enable)
-{
-	
-	Step_init(client);
-	
-}
-else
-{ //disable step
- res = hwmsen_write_byte(client, 0x7e, 0xb2); //clean data
-		if(res != 0) 
-		{
-			return res;
-		}
-	mdelay(100);	
-res = hwmsen_write_byte(client, 0x7e, 0x10); //closed
-		if(res != 0) 
-		{
-			return res;
-		}
-	mdelay(100);	
-  
-   
-}
-		
-	
-	return -1;    
-}
-
-
-static int Step_ReadSensorData(struct i2c_client *client, char *buf, int bufsize)
-{
-	//struct bma250_i2c_data *obj = (struct bma250_i2c_data*)i2c_get_clientdata(client);
-	struct bmi160_acc_i2c_data *obj = obj_i2c_data;
-	u8 databuf[20];
-	u8 buf_step[6] = {0};
-	int res = 0;
-	s16 steps = 0;
-	memset(databuf, 0, sizeof(u8)*10);
-
-	if(NULL == buf)
-	{
-		return -1;
-	}
-	if(NULL == client)
-	{
-		*buf = 0;
-		return -2;
-	}
-       if(steps_reset)
-       {
-         res = Step_SetPowerMode(client, false);
-		if(res)
-		{
-			GSE_ERR("Power on bma250 error %d!\n", res);
-		}
-       }
-	if(step_power == FALSE)
-	{
-		res = Step_SetPowerMode(client, true);
-		if(res)
-		{
-			GSE_ERR("Power on bma250 error %d!\n", res);
-		}
-	}
-
-	if((res = hwmsen_read_block(client, 0x78, buf_step, 0x02)))
-	{
-		GSE_ERR("error: %d\n", res);
-	}
-	else
-	{
-	
-	     steps = (s16)((buf_step[1]<<8) |( buf_step[0]));
-	   printk("heyong qma8961  get sensot steps ===== %d \n ",steps);
-	   sprintf(buf, "%08x", steps);
-	}
-	
-	return 0;
-}
-
-int kk =0;
-int step_operate(void* self, uint32_t command, void* buff_in, int size_in,
-		void* buff_out, int size_out, int* actualout)
-{
-	int err = 0;
-	int value, sample_delay;	
-	struct bmi160_acc_i2c_data *priv = (struct bmi160_acc_i2c_data*)self;
-	hwm_sensor_data* step_data;
-	char buff[BMI160_BUFSIZE];
-
-	printk(" heyong step_operate = %d\n", command);
-	//GSE_FUN(f);
-	switch (command)
-	{
-		case SENSOR_DELAY:
-			if((buff_in == NULL) || (size_in < sizeof(int)))
-			{
-				GSE_ERR("Set delay parameter error!\n");
-				err = -EINVAL;
-			}
-			else
-			{
-				err = 0;
-			}
-			break;
-
-		case SENSOR_ENABLE:
-			if((buff_in == NULL) || (size_in < sizeof(int)))
-			{
-				GSE_ERR("Enable sensor parameter error!\n");
-				err = -EINVAL;
-			}
-			else
-			{
-				value = *(int *)buff_in;
-				if(value)
-				{
-				printk(" heyong step_operate  1111= %d\n", command);
-				err = Step_SetPowerMode( priv->client, true);
-				}
-				else
-				{
-				 printk(" heyong step_operate  2222= %d\n", command);
-				 err = Step_SetPowerMode( priv->client, false);
-				}
-				/*if(((value == 0) && (step_power == false)) ||((value == 1) && (step_power == true)))
-				{
-					GSE_LOG("Gsensor device have updated!\n");
-				}
-				else
-				{
-					err = Step_SetPowerMode( priv->client, !step_power);
-				}*/
-			}
-			break;
-
-		case SENSOR_GET_DATA:
-			if((buff_out == NULL) || (size_out< sizeof(hwm_sensor_data)))
-			{
-				GSE_ERR("get sensor data parameter error!\n");
-				err = -EINVAL;
-			}
-			else
-			{
-				step_data = (hwm_sensor_data *)buff_out;
-				Step_ReadSensorData(priv->client, buff, BMI160_BUFSIZE);
-				//sscanf(buff, "%x %x %x", &step_data->values[0], 
-					//&step_data->values[1], &step_data->values[2]);	
-				
-				sscanf(buff, "%x", &step_data->values[0]);
-				printk("qma8961  get sensot steps  2222222===== %d \n ",step_data->values[0]);
-				//step_data->values[0] = kk+1000;
-				//kk++;
-				
-		                 //step_data->values[1] = step_data->values[2] = 1;
-				step_data->status = SENSOR_STATUS_ACCURACY_MEDIUM;				
-				step_data->value_divide = 1;
-			}
-			break;
-		default:
-			GSE_ERR("gsensor operate function no this parameter %d!\n", command);
-			err = -1;
-			break;
-	}
-	
-	return err;
-}
-#endif
-
-//
 
 /*----------------------------------------------------------------------------*/
 int gsensor_operate(void* self, uint32_t command, void* buff_in, int size_in,
@@ -2847,6 +2759,14 @@ static long bmi160_acc_unlocked_ioctl(struct file *file, unsigned int cmd, unsig
 
 	switch(cmd)
 	{
+		//shihaobin add for do acc-sensor calibrate begin 20150330
+		case ACC_CALIBRATE:
+			err = BMI160_ACC_ResetCalibration(client);
+			yulong_accel_Calibration(client, strbuf, BMI160_BUFSIZE , 20, arg);
+			//yulong_accel_Calibration(client, strbuf, BMI160_BUFSIZE , 20);
+			break;
+			//shihaobin add for do acc-sensor calibrate end 20150330
+
 		case GSENSOR_IOCTL_INIT:
 			bmi160_acc_init_client(client, 0);
 			break;
@@ -3162,10 +3082,6 @@ static int bmi160_acc_suspend(struct i2c_client *client, pm_message_t msg)
 	int err = 0;
 
 	GSE_FUN();
-#ifdef STEP_SENSOR
-         if(step_power)
-		return 0;
-#endif
 	if(msg.event == PM_EVENT_SUSPEND)
 	{
 		if(obj == NULL)
@@ -3222,10 +3138,6 @@ static int bmi160_acc_resume(struct i2c_client *client)
 	int err;
 
 	GSE_FUN();
-#ifdef STEP_SENSOR
-         if(step_power)
-		return 0;
-#endif
 	if(obj == NULL)
 	{
 		GSE_ERR("null pointer!!\n");
@@ -3283,10 +3195,6 @@ static void bmi160_acc_early_suspend(struct early_suspend *h)
 	int err;
 
 	GSE_FUN();
-#ifdef STEP_SENSOR
-         if(step_power)
-		return 0;
-#endif
 	if(obj == NULL)
 	{
 		GSE_ERR("null pointer!!\n");
@@ -3340,10 +3248,6 @@ static void bmi160_acc_late_resume(struct early_suspend *h)
 	int err;
 
 	GSE_FUN();
-#ifdef STEP_SENSOR
-         if(step_power)
-		return 0;
-#endif
 	if(obj == NULL)
 	{
 		GSE_ERR("null pointer!!\n");
@@ -3639,16 +3543,62 @@ int bmi160_o_get_data(int* x ,int* y,int* z, int* status)
 
 	return 0;
 }
-
+//shihaobin@yulong.com add for compatible of gsensor 20150414 end
+extern int get_device_info(char* buf); //liuxinyuan@yulong.com  add for get device info 20150521
 /*----------------------------------------------------------------------------*/
 static int bmi160_acc_i2c_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	struct i2c_client *new_client;
 	struct bmi160_acc_i2c_data *obj;
+	struct hwmsen_object sobj;
 	struct acc_control_path ctl={0};
 	struct acc_data_path data={0};
-	struct hwmsen_object sobj,stepobj;
+	char strbuf[BMI160_BUFSIZE]; //shihaobin add for debug
+
+	//shihaobin@yulong.com add for recognize device begin 20150409
+	u8 beg = BMI160_DEVICE_ID_ADDRESS;
+	u8 device_id = 0;
+	int read_device_id_err = 0;
+	//shihaobin@yulong.com add for recognize device end 20150409
+
+//tad3sgh add ++
+//tad3sgh add --
 	int err = 0;
+
+	//shihaobin@yulong.com add for recognize device begin 20150409
+	if (!client)
+	{
+		return -EINVAL;
+	}
+
+	struct i2c_msg msgs[2] = {
+		{
+			.addr = client->addr,   .flags = 0,
+			.len = 1,               .buf = &beg
+		},
+		{
+			.addr = client->addr,   .flags = I2C_M_RD,
+			.len = 1,               .buf = &device_id
+		}
+	};
+
+	read_device_id_err = i2c_transfer(client->adapter, msgs, sizeof(msgs)/sizeof(msgs[0]));
+
+	printk("yl_sensor_debug %s read_device_id_err = %d, device_id=%d\n", __func__, read_device_id_err,device_id);
+
+	if (read_device_id_err != 2) {
+		GSE_ERR("yl_sensor_debug i2c_transfer error: %d\n", read_device_id_err);
+		err = -ENOMEM;
+		goto exit;
+	} else {
+		if (BMI160_DEVICE_ID_VALUE != device_id)
+		{
+			GSE_ERR("yl_sensor_debug This is not bmi160 device, device_id = %d\n", device_id);
+			err = -ENOMEM;
+			goto exit;
+		}
+	}
+	//shihaobin@yulong.com add for recognize device end 20150409
 
 	GSE_FUN();
 
@@ -3660,7 +3610,7 @@ static int bmi160_acc_i2c_probe(struct i2c_client *client, const struct i2c_devi
 
 	memset(obj, 0, sizeof(struct bmi160_acc_i2c_data));
 
-	obj->hw = get_cust_acc_hw();
+		obj->hw = bmi160_get_cust_acc_hw();
 
 	err = hwmsen_get_convert(obj->hw->direction, &obj->cvt);
 	if(err) {
@@ -3750,17 +3700,6 @@ static int bmi160_acc_i2c_probe(struct i2c_client *client, const struct i2c_devi
 		goto exit_kfree;
 	}
 
-#ifdef  STEP_SENSOR
-    stepobj.self = obj;
-    stepobj.polling = 1;
-    stepobj.sensor_operate = step_operate;
-	if((err = hwmsen_attach(ID_STEP_COUNTER, &stepobj)))
-	{
-		GSE_ERR("attach fail = %d\n", err);
-		goto exit_kfree;
-	}
-#endif	
-
 //tad3sgh add --
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	obj->early_drv.level    = EARLY_SUSPEND_LEVEL_DISABLE_FB - 1,
@@ -3769,7 +3708,11 @@ static int bmi160_acc_i2c_probe(struct i2c_client *client, const struct i2c_devi
 	register_early_suspend(&obj->early_drv);
 #endif
 
-	bmi160_acc_init_flag =0;
+	//shihaobin add for debug
+	//yulong_accel_Calibration(new_client, strbuf, BMI160_BUFSIZE , 20);
+	//get_device_info(" ACC: bmi160 BOSCH \n"); // liuxinyuan@yulong.com add for get device info 20150521
+	bmi160_acc_init_flag = 0;
+	printk("yl_sensor_debug %s OK!\n", __func__);
 	GSE_LOG("%s: OK\n", __func__);
 	return 0;
 
@@ -3798,10 +3741,7 @@ static int bmi160_acc_i2c_probe(struct i2c_client *client, const struct i2c_devi
 static int bmi160_acc_i2c_remove(struct i2c_client *client)
 {
 	int err = 0;
-#ifdef  STEP_SENSOR
-   if(step_power)
-   	return 0;
-#endif
+
 	err = bmi160_acc_delete_attr(&(bmi160_acc_init_info.platform_diver_addr->driver));
 	if(err) {
 		GSE_ERR("bma150_delete_attr fail: %d\n", err);
@@ -3830,7 +3770,7 @@ static int bmi160_acc_i2c_remove(struct i2c_client *client)
 
 static int  bmi160_acc_local_init(void)
 {
-	struct acc_hw *hw = get_cust_acc_hw();
+	struct acc_hw *hw = bmi160_get_cust_acc_hw();
 	GSE_LOG("fwq loccal init+++\n");
 
 	BMI160_ACC_power(hw, 1);
@@ -3849,13 +3789,9 @@ static int  bmi160_acc_local_init(void)
 
 static int bmi160_acc_remove(void)
 {
-	struct acc_hw *hw = get_cust_acc_hw();
+	struct acc_hw *hw = bmi160_get_cust_acc_hw();
 
 	GSE_FUN();
-#ifdef  STEP_SENSOR
-   if(step_power)
-   	return 0;
-#endif
 	BMI160_ACC_power(hw, 0);
 	i2c_del_driver(&bmi160_acc_i2c_driver);
 	return 0;
@@ -3870,12 +3806,18 @@ static struct acc_init_info bmi160_acc_init_info = {
 /*----------------------------------------------------------------------------*/
 static int __init bmi160_acc_init(void)
 {
-	struct acc_hw *hw = get_cust_acc_hw();
+	struct acc_hw *hw = bmi160_get_cust_acc_hw();
 
 	GSE_FUN();
 	i2c_register_board_info(hw->i2c_num, &bmi160_acc_i2c_info, 1);
+	//shihaobin@yulong.com modify for compatible of gsensor 20150414 begin
+	/*if(platform_driver_register(&bmi160_acc_gsensor_driver))
+	{
+		GSE_ERR("failed to register driver");
+		return -ENODEV;
+	}*/
 	acc_driver_add(&bmi160_acc_init_info);
-
+	//shihaobin@yulong.com modify for compatible of gsensor 20150414 end
 	return 0;
 }
 /*----------------------------------------------------------------------------*/
@@ -3890,3 +3832,4 @@ module_exit(bmi160_acc_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("BMI160_ACC I2C driver");
 MODULE_AUTHOR("hongji.zhou@bosch-sensortec.com");
+

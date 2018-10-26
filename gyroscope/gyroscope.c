@@ -1,3 +1,4 @@
+
 #include "gyroscope.h"
 
 struct gyro_context *gyro_context_obj = NULL;
@@ -17,7 +18,6 @@ static void gyro_work_func(struct work_struct *work)
 	int64_t  nt;
 	struct timespec time; 
 	int err = 0;	
-	static int flag=0;
 
 	cxt  = gyro_context_obj;
 	
@@ -33,11 +33,6 @@ static void gyro_work_func(struct work_struct *work)
 	
     //add wake lock to make sure data can be read before system suspend
 	cxt->gyro_data.get_data(&x,&y,&z,&status);
-	flag = !flag;
-	if(flag)
-		z++;
-	else
-		z--;
 
 	if(err)
 	{
@@ -46,19 +41,15 @@ static void gyro_work_func(struct work_struct *work)
 	}
 	else
 	{
-#if 0
 		if((x != cxt->drv_data.gyro_data.values[0]) 
 					|| (y != cxt->drv_data.gyro_data.values[1])
 					|| (z != cxt->drv_data.gyro_data.values[2]))
 		{	
-#endif
-#if 0
 			if( 0 == x && 0==y 
 						&& 0 == z)
 			{
 				    goto gyro_loop;
 			}
-#endif
 
 			cxt->drv_data.gyro_data.values[0] = x+cxt->cali_sw[0];
 			cxt->drv_data.gyro_data.values[1] = y+cxt->cali_sw[1];
@@ -66,9 +57,7 @@ static void gyro_work_func(struct work_struct *work)
 			cxt->drv_data.gyro_data.status = status;
 			cxt->drv_data.gyro_data.time = nt;
 					
-#if 0
 		}			
-#endif
 	 }
     
 	if(true ==  cxt->is_first_data_after_enable)
@@ -498,7 +487,12 @@ static struct platform_driver gyroscope_driver = {
 	}
 };
 
-static int gyro_real_driver_init(void) 
+//shihaobin@yulong.com add for gyro_sensor compatible begin 20150418
+ int bmi160_gyro_init_flag = -1; // 0<==>OK -1 <==> fail;
+ int lsm6ds3_gyro_init_flag = -1; // 0<==>OK -1 <==> fail;
+//shihaobin@yulong.com add for gyro_sensor compatible end 20150418
+
+static int gyro_real_driver_init(void)
 {
     int i =0;
 	int err=0;
@@ -510,7 +504,11 @@ static int gyro_real_driver_init(void)
 	  {
 	    	GYRO_LOG(" gyro try to init driver %s\n", gyroscope_init_list[i]->name);
 	    	err = gyroscope_init_list[i]->init();
-		if(0 == err)
+	//shihaobin@yulong.com add for gyro_sensor compatible begin 20150418
+	//if(0 == err)
+	if (((0 == err) && (0 == bmi160_gyro_init_flag))
+		|| ((0 == err) && (0 == lsm6ds3_gyro_init_flag)))
+      //shihaobin@yulong.com add for gyro_sensor compatible end 20150418
 		{
 		   GYRO_LOG(" gyro real driver %s probe ok\n", gyroscope_init_list[i]->name);
 		   break;
@@ -878,8 +876,8 @@ static int __init gyro_init(void)
 
 static void __exit gyro_exit(void)
 {
-	platform_driver_unregister(&gyro_driver); 
-	platform_driver_unregister(&gyroscope_driver);      
+	platform_driver_unregister(&gyro_driver);
+	platform_driver_unregister(&gyroscope_driver);
 }
 
 late_initcall(gyro_init);

@@ -257,6 +257,32 @@ struct odr_t {
 	u8 mag_odr;
 };
 
+//shihaobin add for acc-sensor calibrate begin 20150330
+#define BMI160_IOCTL_MAGIC      'd'
+#define ACC_CALIBRATE   _IOR(BMI160_IOCTL_MAGIC, 6, short)
+
+struct acc_offset{
+	signed short key;   //calibrate status
+	signed short x;     //x offset
+	signed short y;     //y offset
+	signed short z;     //z offset
+};
+//shihaobin add for acc-sensor calibrate begin 20150330
+
+//shihaobin@yulong.com add for recognize device begin 20150409
+#define BMI160_DEVICE_ID_ADDRESS    0x00
+#define BMI160_DEVICE_ID_VALUE      0xD1
+//shihaobin@yulong.com add for recognize device end 20150409
+
+//shihaobin@yulong.com add for read acc data begin 20150411
+#define BMI160_ACC_DATA_REG_L_X     0x12
+#define BMI160_ACC_DATA_REG_H_X     0x13
+#define BMI160_ACC_DATA_REG_L_Y     0x14
+#define BMI160_ACC_DATA_REG_H_Y     0x15
+#define BMI160_ACC_DATA_REG_L_Z     0x16
+#define BMI160_ACC_DATA_REG_H_Z     0x17
+//shihaobin@yulong.com add for read acc data end 20150411
+
 /*bmi fifo sensor type combination*/
 enum BMI_FIFO_DATA_SELECT_T {
 	BMI_FIFO_A_SEL = 1,

@@ -93,6 +93,28 @@
 #define BMI160_USER_GYR_CONF_ODR__MSK               0x0F
 #define BMI160_USER_GYR_CONF_ODR__REG               BMI160_USER_GYR_CONF_ADDR
 
+//shihaobin@yulong.com add for read acc data begin 20150411
+#define BMI160_IOCTL_MAGIC      'd'
+#define GYRO_CALIBRATE   _IOR(BMI160_IOCTL_MAGIC, 7, short)
+
+struct gyro_offset{
+    signed short key;   //calibrate status
+    signed short x;     //x offset
+    signed short y;     //y offset
+    signed short z;     //z offset
+};
+
+#define BMI160_GYRO_DATA_REG_L_X     0x0C
+#define BMI160_GYRO_DATA_REG_H_X     0x0D
+#define BMI160_GYRO_DATA_REG_L_Y     0x0E
+#define BMI160_GYRO_DATA_REG_H_Y     0x0F
+#define BMI160_GYRO_DATA_REG_L_Z     0x10
+#define BMI160_GYRO_DATA_REG_H_Z     0x11
+
+#define BMI160_GYRO_SUCCESS                  0
+#define BMI160_GYRO_ERR_I2C                  -1
+//shihaobin@yulong.com add for read acc data end 20150411
+
 /* range */
 #define BMI160_RANGE_2000			0
 #define BMI160_RANGE_1000			1

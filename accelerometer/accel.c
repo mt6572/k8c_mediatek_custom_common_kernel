@@ -1,8 +1,9 @@
 #include "accel.h"
+#include "accel_factory.h"
 
-static struct acc_context *acc_context_obj = NULL;
+struct acc_context *acc_context_obj = NULL;
 
-static struct acc_init_info* gsensor_init_list[MAX_CHOOSE_G_NUM]= {0}; //modified
+static struct acc_init_info *gsensor_init_list[MAX_CHOOSE_G_NUM]= {0}; //modified
 static void acc_early_suspend(struct early_suspend *h);
 static void acc_late_resume(struct early_suspend *h);
 
@@ -10,51 +11,40 @@ static void acc_work_func(struct work_struct *work)
 {
 
 	struct acc_context *cxt = NULL;
-	int out_size;
-	//hwm_sensor_data sensor_data;
-	int x,y,z,status,div;
-	int64_t  nt;
-	struct timespec time; 
-	int err, idx;	
+	/* hwm_sensor_data sensor_data; */
+	int x, y, z, status;
+	int64_t nt;
+	struct timespec time;
+	int err;
 
-	cxt  = acc_context_obj;
-	
-	if(NULL == cxt->acc_data.get_data)
-	{
-		ACC_LOG("acc driver not register data path\n");
+	cxt = acc_context_obj;
+
+	if (NULL == cxt->acc_data.get_data) {
+		ACC_ERR("acc driver not register data path\n");
+		return;
 	}
 
-	
+
 	time.tv_sec = time.tv_nsec = 0;    
 	time = get_monotonic_coarse(); 
 	nt = time.tv_sec*1000000000LL+time.tv_nsec;
-	
+
 	err = cxt->acc_data.get_data(&x,&y,&z,&status);
 
-	if(err)
-	{
-		ACC_ERR("get acc data fails!!\n" );
+	if (err) {
+		ACC_ERR("get acc data fails!!\n");
 		goto acc_loop;
-	}
-	else
-	{
-		if((x != cxt->drv_data.acc_data.values[0]) 
-					|| (y != cxt->drv_data.acc_data.values[1])
-					|| (z != cxt->drv_data.acc_data.values[2]))
-		{	
-			if( 0 == x && 0==y 
-						&& 0 == z)
-			{
-				    goto acc_loop;
-			}
+	} else {
+		if (0 == x && 0 == y && 0 == z) {
+			goto acc_loop;
+		}
 
 			cxt->drv_data.acc_data.values[0] = x;
 			cxt->drv_data.acc_data.values[1] = y;
 			cxt->drv_data.acc_data.values[2] = z;
 			cxt->drv_data.acc_data.status = status;
 			cxt->drv_data.acc_data.time = nt;
-					
-		}			
+							
 	 }
     
 	if(true ==  cxt->is_first_data_after_enable)
@@ -70,10 +60,10 @@ static void acc_work_func(struct work_struct *work)
 			
 	    }
 	}
-	//report data to input device
-	//printk("new acc work run....\n");
-	//ACC_LOG("acc data[%d,%d,%d]  \n" ,cxt->drv_data.acc_data.values[0],
-	//cxt->drv_data.acc_data.values[1],cxt->drv_data.acc_data.values[2]);
+	/* report data to input device */
+	/* printk("new acc work run....\n"); */
+	/* ACC_LOG("acc data[%d,%d,%d] \n" ,cxt->drv_data.acc_data.values[0], */
+	/* cxt->drv_data.acc_data.values[1],cxt->drv_data.acc_data.values[2]); */
 
 	acc_data_report(cxt->drv_data.acc_data.values[0],
 		cxt->drv_data.acc_data.values[1],cxt->drv_data.acc_data.values[2],
@@ -115,13 +105,17 @@ static struct acc_context *acc_context_alloc_object(void)
 	obj->is_first_data_after_enable = false;
 	obj->is_polling_run = false;
 	mutex_init(&obj->acc_op_mutex);
+	obj->is_batch_enable = false;//for batch mode init
+	obj->cali_sw[ACC_AXIS_X]=0;
+	obj->cali_sw[ACC_AXIS_Y]=0;
+	obj->cali_sw[ACC_AXIS_Z]=0;
 	ACC_LOG("acc_context_alloc_object----\n");
 	return obj;
 }
 
 static int acc_real_enable(int enable)
 {
-  int err =0;
+  int err = 0;
   struct acc_context *cxt = NULL;
   cxt = acc_context_obj;
   if(1==enable)
@@ -174,17 +168,18 @@ static int acc_enable_data(int enable)
     if(1 == enable)
     {
        ACC_LOG("ACC enable data\n");
-	   cxt->is_active_data =true;
-       cxt->is_first_data_after_enable = true;
-	   cxt->acc_ctl.open_report_data(1);
-	   if(false == cxt->is_polling_run)
-	   {
-	      if(false == cxt->acc_ctl.is_report_input_direct)
-	      {
-	      	mod_timer(&cxt->timer, jiffies + atomic_read(&cxt->delay)/(1000/HZ));
-		  	cxt->is_polling_run = true;
-	      }
-	   }
+	cxt->is_active_data =true;
+        cxt->is_first_data_after_enable = true;
+	cxt->acc_ctl.open_report_data(1);
+	acc_real_enable(enable);
+	if(false == cxt->is_polling_run && cxt->is_batch_enable == false)
+	{
+		if(false == cxt->acc_ctl.is_report_input_direct)
+		{
+			mod_timer(&cxt->timer, jiffies + atomic_read(&cxt->delay)/(1000/HZ));
+			cxt->is_polling_run = true;
+		}
+	}
     }
 	if(0 == enable)
 	{
@@ -197,16 +192,17 @@ static int acc_enable_data(int enable)
 	      if(false == cxt->acc_ctl.is_report_input_direct)
 	      {
 	      	cxt->is_polling_run = false;
+			smp_mb();
 	      	del_timer_sync(&cxt->timer);
+			smp_mb();
 	      	cancel_work_sync(&cxt->report);
 			cxt->drv_data.acc_data.values[0] = ACC_INVALID_VALUE;
 	   		cxt->drv_data.acc_data.values[1] = ACC_INVALID_VALUE;
 	   		cxt->drv_data.acc_data.values[2] = ACC_INVALID_VALUE;
 	      }
 	   }
-	   
+	   acc_real_enable(enable);
 	}
-	acc_real_enable(enable);
 	return 0;
 }
 
@@ -215,7 +211,6 @@ static int acc_enable_data(int enable)
 int acc_enable_nodata(int enable)
 {
     struct acc_context *cxt = NULL;
-	int err =0;
 	cxt = acc_context_obj;
 	if(NULL  == cxt->acc_ctl.enable_nodata)
 	{
@@ -248,10 +243,11 @@ static ssize_t acc_show_enable_nodata(struct device* dev,
 static ssize_t acc_store_enable_nodata(struct device* dev, struct device_attribute *attr,
                                   const char *buf, size_t count)
 {
+	struct acc_context *cxt = NULL;
 	ACC_LOG("acc_store_enable nodata buf=%s\n",buf);
 	mutex_lock(&acc_context_obj->acc_op_mutex);
-	struct acc_context *cxt = NULL;
-	int err =0;
+
+	
 	cxt = acc_context_obj;
 	if(NULL == cxt->acc_ctl.enable_nodata)
 	{
@@ -274,15 +270,15 @@ static ssize_t acc_store_enable_nodata(struct device* dev, struct device_attribu
 	  ACC_ERR(" acc_store enable nodata cmd error !!\n");
 	}
 	mutex_unlock(&acc_context_obj->acc_op_mutex);
+	return count;
 }
 
 static ssize_t acc_store_active(struct device* dev, struct device_attribute *attr,
                                   const char *buf, size_t count)
 {
-    ACC_LOG("acc_store_active buf=%s\n",buf);
-	mutex_lock(&acc_context_obj->acc_op_mutex);
 	struct acc_context *cxt = NULL;
-	int err =0;
+	ACC_LOG("acc_store_active buf=%s\n",buf);
+	mutex_lock(&acc_context_obj->acc_op_mutex);
 	cxt = acc_context_obj;
 	if(NULL == cxt->acc_ctl.open_report_data)
 	{
@@ -316,25 +312,20 @@ static ssize_t acc_show_active(struct device* dev,
 {
 	struct acc_context *cxt = NULL;
 	cxt = acc_context_obj;
-
-    int len = 0;
-	ACC_LOG("acc show active not support now\n");
-	int div=cxt->acc_data.vender_div;
+	int div = 0;
+	div=cxt->acc_data.vender_div;
 	ACC_LOG("acc vender_div value: %d\n", div);
-	return snprintf(buf, PAGE_SIZE, "%d\n", div); 
-	
-	//return len;
+	return snprintf(buf, PAGE_SIZE, "%d\n", div);
 }
 
 static ssize_t acc_store_delay(struct device* dev, struct device_attribute *attr,
                                   const char *buf, size_t count)
 {
-	mutex_lock(&acc_context_obj->acc_op_mutex);
-    struct acc_context *devobj = (struct acc_context*)dev_get_drvdata(dev);
-    int delay;
-	int mdelay=0;
 	struct acc_context *cxt = NULL;
-	int err =0;
+	mutex_lock(&acc_context_obj->acc_op_mutex);
+	//struct acc_context *devobj = (struct acc_context*)dev_get_drvdata(dev);
+	int delay = 0;
+	int mdelay=0;
 	cxt = acc_context_obj;
 	if(NULL == cxt->acc_ctl.set_delay)
 	{
@@ -378,13 +369,79 @@ static ssize_t acc_show_sensordevnum(struct device* dev,
 	return snprintf(buf, PAGE_SIZE, "%s\n", devname+5); 
 }
 
+
+static ssize_t acc_store_batch(struct device* dev, struct device_attribute *attr,
+                                  const char *buf, size_t count)
+{
+  struct acc_context *cxt = NULL;
+  ACC_LOG("acc_store_batch buf=%s\n",buf);
+  mutex_lock(&acc_context_obj->acc_op_mutex);
+  cxt = acc_context_obj;
+  if(cxt->acc_ctl.is_support_batch){
+        if (!strncmp(buf, "1", 1))
+    {
+          cxt->is_batch_enable = true;
+      if(true == cxt->is_polling_run)
+      {
+        cxt->is_polling_run = false;
+        del_timer_sync(&cxt->timer);
+        cancel_work_sync(&cxt->report);
+        cxt->drv_data.acc_data.values[0] = ACC_INVALID_VALUE;
+        cxt->drv_data.acc_data.values[1] = ACC_INVALID_VALUE;
+        cxt->drv_data.acc_data.values[2] = ACC_INVALID_VALUE;
+      }
+        }
+    else if (!strncmp(buf, "0", 1))
+    {
+      cxt->is_batch_enable = false;
+      if(false == cxt->is_polling_run)
+      {
+        if(false == cxt->acc_ctl.is_report_input_direct)
+        {
+          mod_timer(&cxt->timer, jiffies + atomic_read(&cxt->delay)/(1000/HZ));
+          cxt->is_polling_run = true;
+        }
+      }
+        }
+    else
+    {
+      ACC_ERR(" acc_store_batch error !!\n");
+    }
+  }else{
+    ACC_LOG(" acc_store_batch mot supported\n");
+  }
+  mutex_unlock(&acc_context_obj->acc_op_mutex);
+  ACC_LOG(" acc_store_batch done: %d\n", cxt->is_batch_enable);
+      return count;
+
+}
+static ssize_t acc_show_batch(struct device* dev,
+                                 struct device_attribute *attr, char *buf)
+{
+  return snprintf(buf, PAGE_SIZE, "%d\n", 0);
+}
+static ssize_t acc_store_flush(struct device* dev, struct device_attribute *attr,
+                                  const char *buf, size_t count)
+{
+  //mutex_lock(&acc_context_obj->acc_op_mutex);
+   // struct acc_context *devobj = (struct acc_context*)dev_get_drvdata(dev);
+  //do read FIFO data function and report data immediately
+  //mutex_unlock(&acc_context_obj->acc_op_mutex);
+    return count;
+}
+
+static ssize_t acc_show_flush(struct device* dev,
+                                 struct device_attribute *attr, char *buf)
+{
+  return snprintf(buf, PAGE_SIZE, "%d\n", 0);
+}
 static int gsensor_remove(struct platform_device *pdev)
 {
 	ACC_LOG("gsensor_remove\n");
 	return 0;
 }
 
-static int gsensor_probe(struct platform_device *pdev) 
+static int gsensor_probe(struct platform_device *pdev)
 {
 	ACC_LOG("gsensor_probe\n");
     return 0;
@@ -399,6 +456,11 @@ static struct platform_driver gsensor_driver = {
 	}
 };
 
+//shihaobin@yulong.com add for acc_sensor compatible begin 20150418
+ int bmi160_acc_init_flag = -1; // 0<==>OK -1 <==> fail
+ int lsm6ds3_acc_init_flag = -1; // 0<==>OK -1 <==> fail
+//shihaobin@yulong.com add for acc_sensor compatible end 20150418
+
 static int acc_real_driver_init(void) 
 {
     int i =0;
@@ -411,8 +473,9 @@ static int acc_real_driver_init(void)
 	  {
 	    ACC_LOG(" acc try to init driver %s\n", gsensor_init_list[i]->name);
 	    err = gsensor_init_list[i]->init();
-		if(0 == err)
-		{
+
+		if (((0 == err) && (0 == bmi160_acc_init_flag))
+			  || ((0 == err) && (0 == lsm6ds3_acc_init_flag))){
 		   ACC_LOG(" acc real driver %s probe ok\n", gsensor_init_list[i]->name);
 		   break;
 		}
@@ -433,11 +496,14 @@ static int acc_real_driver_init(void)
 	int i =0;
 	
 	ACC_FUN();
-
+  if (!obj) {
+    ACC_ERR("ACC driver add fail, acc_init_info is NULL \n");
+    return -1;
+  }
 	
 	for(i =0; i < MAX_CHOOSE_G_NUM; i++ )
 	{
-		if(i == 0){
+		if((i == 0) && (NULL == gsensor_init_list[0])) {
 			ACC_LOG("register gensor driver for the first time\n");
 			if(platform_driver_register(&gsensor_driver))
 			{
@@ -452,7 +518,7 @@ static int acc_real_driver_init(void)
 		  break;
 	    }
 	}
-	if(NULL==gsensor_init_list[i])
+	if(i >= MAX_CHOOSE_G_NUM)
 	{
 	   ACC_ERR("ACC driver add err \n");
 	   err=-1;
@@ -476,13 +542,6 @@ static int acc_misc_init(struct acc_context *cxt)
 	return err;
 }
 
-static void acc_input_destroy(struct acc_context *cxt)
-{
-	struct input_dev *dev = cxt->idev;
-
-	input_unregister_device(dev);
-	input_free_device(dev);
-}
 
 static int acc_input_init(struct acc_context *cxt)
 {
@@ -499,6 +558,7 @@ static int acc_input_init(struct acc_context *cxt)
 	input_set_capability(dev, EV_ABS, EVENT_TYPE_ACCEL_Y);
 	input_set_capability(dev, EV_ABS, EVENT_TYPE_ACCEL_Z);
 	input_set_capability(dev, EV_ABS, EVENT_TYPE_ACCEL_STATUS);
+	input_set_capability(dev, EV_REL, EVENT_TYPE_ACCEL_UPDATE);
 	
 	input_set_abs_params(dev, EVENT_TYPE_ACCEL_X, ACC_VALUE_MIN, ACC_VALUE_MAX, 0, 0);
 	input_set_abs_params(dev, EVENT_TYPE_ACCEL_Y, ACC_VALUE_MIN, ACC_VALUE_MAX, 0, 0);
@@ -519,12 +579,16 @@ static int acc_input_init(struct acc_context *cxt)
 DEVICE_ATTR(accenablenodata,     S_IWUSR | S_IRUGO, acc_show_enable_nodata, acc_store_enable_nodata);
 DEVICE_ATTR(accactive,     S_IWUSR | S_IRUGO, acc_show_active, acc_store_active);
 DEVICE_ATTR(accdelay,      S_IWUSR | S_IRUGO, acc_show_delay,  acc_store_delay);
+DEVICE_ATTR(accbatch,         S_IWUSR | S_IRUGO, acc_show_batch,  acc_store_batch);
+DEVICE_ATTR(accflush,         S_IWUSR | S_IRUGO, acc_show_flush,  acc_store_flush);
 DEVICE_ATTR(accdevnum,      		S_IWUSR | S_IRUGO, acc_show_sensordevnum,  NULL);
 
 static struct attribute *acc_attributes[] = {
 	&dev_attr_accenablenodata.attr,
 	&dev_attr_accactive.attr,
 	&dev_attr_accdelay.attr,
+	&dev_attr_accbatch.attr,
+	&dev_attr_accflush.attr,
 	&dev_attr_accdevnum.attr,
 	NULL
 };
@@ -536,9 +600,9 @@ static struct attribute_group acc_attribute_group = {
 int acc_register_data_path(struct acc_data_path *data)
 {
 	struct acc_context *cxt = NULL;
-	int err =0;
 	cxt = acc_context_obj;
 	cxt->acc_data.get_data = data->get_data;
+	cxt->acc_data.get_raw_data = data->get_raw_data;
 	cxt->acc_data.vender_div = data->vender_div;
 	ACC_LOG("acc register data path vender_div: %d\n", cxt->acc_data.vender_div);
 	if(NULL == cxt->acc_data.get_data)
@@ -557,6 +621,9 @@ int acc_register_control_path(struct acc_control_path *ctl)
 	cxt->acc_ctl.set_delay = ctl->set_delay;
 	cxt->acc_ctl.open_report_data= ctl->open_report_data;
 	cxt->acc_ctl.enable_nodata = ctl->enable_nodata;
+	cxt->acc_ctl.is_support_batch = ctl->is_support_batch;
+	cxt->acc_ctl.is_report_input_direct= ctl->is_report_input_direct;
+	cxt->acc_ctl.acc_calibration = ctl->acc_calibration;
 
 	if(NULL==cxt->acc_ctl.set_delay || NULL==cxt->acc_ctl.open_report_data
 		|| NULL==cxt->acc_ctl.enable_nodata)
@@ -579,21 +646,23 @@ int acc_register_control_path(struct acc_control_path *ctl)
 	   ACC_ERR("unable to create acc attribute file\n");
 	   return -3;
 	}
-	
+	kobject_uevent(&acc_context_obj->mdev.this_device->kobj, KOBJ_ADD);
 	return 0;	
 }
 
 int acc_data_report(int x, int y, int z,int status)
 {
-	//ACC_LOG("+acc_data_report! %d, %d, %d, %d\n",x,y,z,status);
-    struct acc_context *cxt = NULL;
-	int err =0;
+	/* ACC_LOG("+acc_data_report! %d, %d, %d, %d\n",x,y,z,status); */
+	struct acc_context *cxt = NULL;
+	int err = 0;
 	cxt = acc_context_obj;
-  	input_report_abs(cxt->idev, EVENT_TYPE_ACCEL_X, x);
+	input_report_abs(cxt->idev, EVENT_TYPE_ACCEL_X, x);
 	input_report_abs(cxt->idev, EVENT_TYPE_ACCEL_Y, y);
 	input_report_abs(cxt->idev, EVENT_TYPE_ACCEL_Z, z);
 	input_report_abs(cxt->idev, EVENT_TYPE_ACCEL_STATUS, status);
-	input_sync(cxt->idev); 
+	input_report_rel(cxt->idev, EVENT_TYPE_ACCEL_UPDATE, 1);
+	input_sync(cxt->idev);
+	return err;
 }
 
 static int acc_probe(struct platform_device *pdev) 
@@ -617,7 +686,12 @@ static int acc_probe(struct platform_device *pdev)
 		ACC_ERR("acc real driver init fail\n");
 		goto real_driver_init_fail;
 	}
-
+	//init acc common factory mode misc device
+	err = acc_factory_device_init();
+	if(err)
+	{
+		ACC_ERR("acc factory device already registed\n");
+	}
 	//init input dev
 	err = acc_input_init(acc_context_obj);
 	if(err)
@@ -632,22 +706,10 @@ static int acc_probe(struct platform_device *pdev)
 	acc_context_obj->early_drv.resume   = acc_late_resume,    
 	register_early_suspend(&acc_context_obj->early_drv);
 
-	wake_lock_init(&(acc_context_obj->read_data_wake_lock),WAKE_LOCK_SUSPEND,"read_data_wake_lock");
    
 	ACC_LOG("----accel_probe OK !!\n");
 	return 0;
 
-	exit_hwmsen_create_attr_failed:
-	exit_misc_register_failed:    
-
-	exit_err_sysfs:
-	
-	if (err)
-	{
-	   ACC_ERR("sysfs node creation error \n");
-	   acc_input_destroy(acc_context_obj);
-	}
-	
 	real_driver_init_fail:
 	exit_alloc_input_dev_failed:    
 	kfree(acc_context_obj);
@@ -732,9 +794,9 @@ static void __exit acc_exit(void)
 	platform_driver_unregister(&acc_driver); 
 	platform_driver_unregister(&gsensor_driver);      
 }
-
-module_init(acc_init);
-module_exit(acc_exit);
+late_initcall(acc_init);
+//module_init(acc_init);
+//module_exit(acc_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("ACCELEROMETER device driver");
 MODULE_AUTHOR("Mediatek");

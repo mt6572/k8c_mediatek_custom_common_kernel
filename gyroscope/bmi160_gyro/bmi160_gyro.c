@@ -34,42 +34,6 @@
 #include <linux/mutex.h>
 #include <linux/module.h>
 
-#if 0
-#ifdef MT6516
-#include <mach/mt6516_devs.h>
-#include <mach/mt6516_typedefs.h>
-#include <mach/mt6516_gpio.h>
-#include <mach/mt6516_pll.h>
-#endif
-
-#ifdef MT6573
-#include <mach/mt6573_devs.h>
-#include <mach/mt6573_typedefs.h>
-#include <mach/mt6573_gpio.h>
-#include <mach/mt6573_pll.h>
-#endif
-
-#ifdef MT6575
-#include <mach/mt6575_devs.h>
-#include <mach/mt6575_typedefs.h>
-#include <mach/mt6575_gpio.h>
-#include <mach/mt6575_pm_ldo.h>
-#endif
-
-#ifdef MT6577
-#include <mach/mt6577_devs.h>
-#include <mach/mt6577_typedefs.h>
-#include <mach/mt6577_gpio.h>
-#include <mach/mt6577_pm_ldo.h>
-#endif
-
-#if defined(MT6573) || defined(MT6575) || defined(MT6577)
-#define POWER_NONE_MACRO MT65XX_POWER_NONE
-#elif defined(MT6516)
-#define POWER_NONE_MACRO MT6516_POWER_NONE
-#endif
-#endif
-
 #include <mach/mt_typedefs.h>
 #include <mach/mt_gpio.h>
 #include <mach/mt_pm_ldo.h>
@@ -83,6 +47,24 @@
 #include <linux/sensors_io.h>
 #include <linux/hwmsen_helper.h>
 #include "bmi160_gyro.h"
+
+//shihaobin add for acc_calibration begin 20150330
+#include <linux/wakelock.h>
+#include <linux/batch.h>
+
+#define NAND_FLASH_WR_RD_SIZE 10
+
+extern int read_acc_ps_cal_data_from_flash(unsigned int offset, char* output, int counts);
+extern int write_acc_ps_cal_data_to_flash(unsigned int offset, char* input, int counts);
+static int yulong_gyro_Calibration(struct i2c_client *client, char *buf, int bufsize,int count,unsigned long cal_arg);
+static int yulong_gyro_ReadCalibration(struct i2c_client *client);
+//shihaobin add for acc_calibration end 20150330
+
+
+extern struct gyro_hw* bmi160_get_cust_gyro_hw(void) ;  //shihaobin@yulong.com add for compatible 20150410
+
+struct bmg_i2c_data *bmg_i2c_client = NULL;               //shihaobin@yulong.com add for calibration 20150414
+
 
 /* sensor type */
 enum SENSOR_TYPE_ENUM {
@@ -150,6 +132,7 @@ struct bmg_i2c_data {
 	atomic_t	suspend;
 	atomic_t	filter;
 	s16	cali_sw[BMG_AXES_NUM+1];/* unmapped axis value */
+    	s16         data[BMG_AXES_NUM+1];   //shihaobin add for calibration 20150414
 
 	/* hw offset */
 	s8	offset[BMG_AXES_NUM+1];/*+1: for 4-byte alignment*/
@@ -159,43 +142,30 @@ struct bmg_i2c_data {
 	atomic_t	fir_en;
 	struct data_filter	fir;
 #endif
-
-/*hzy add for early suspend*/
-#if defined(CONFIG_HAS_EARLYSUSPEND)
-    struct early_suspend    early_drv;
-#endif
 };
 
-#if 0
+#ifndef GYRO_TAG
 /* log macro */
-#define GYRO_DEBUG	0
 #define GYRO_TAG                  "[gyroscope] "
-#if GYRO_DEBUG
 #define GYRO_FUN(f)               printk(KERN_INFO GYRO_TAG"%s\n", __func__)
-#define GYRO_LOG(fmt, args...)    printk(KERN_INFO GYRO_TAG fmt, ##args)
-#else
-#define GYRO_FUN(f)
-#define GYRO_LOG(fmt, args...)
-#endif
 #define GYRO_ERR(fmt, args...) \
-	printk(KERN_ERR GYRO_TAG"%s %d : "fmt, __func__, __LINE__, ##args)
+  printk(KERN_ERR GYRO_TAG"%s %d : "fmt, __func__, __LINE__, ##args)
+#define GYRO_LOG(fmt, args...)    printk(KERN_INFO GYRO_TAG fmt, ##args)
 #endif
 
-#if 0
-static struct platform_driver bmg_gyroscope_driver;
-#endif
 static struct gyro_init_info bmi160_gyro_init_info;
-static int bmi160_gyro_init_flag =-1; // 0<==>OK -1 <==> fail
+extern int bmi160_gyro_init_flag; // 0<==>OK -1 <==> fail
 static struct i2c_driver bmg_i2c_driver;
-static struct bmg_i2c_data *obj_i2c_data;
+static struct bmg_i2c_data *obj_i2c_data = NULL;
 static int bmg_set_powermode(struct i2c_client *client,
-		enum BMG_POWERMODE_ENUM power_mode);
+        enum BMG_POWERMODE_ENUM power_mode);
 static const struct i2c_device_id bmg_i2c_id[] = {
-	{BMG_DEV_NAME, 0},
-	{}
+    {BMG_DEV_NAME, 0},
+    {}
 };
 
-#define USE_DAEMON
+//#define USE_DAEMON
+#ifdef USE_DAEMON
 extern struct mutex uplink_event_flag_mutex;
 extern volatile u32 uplink_event_flag;
 extern int m4g_data[];
@@ -205,6 +175,7 @@ extern wait_queue_head_t uplink_event_flag_wq;
 extern struct mutex sensor_data_mutex;
 static u32 BMMDRV_ULEVT_FLAG_G_ACTIVE = 0x0004;
 static u32 BMMDRV_ULEVT_FLAG_G_DELAY = 0x0400;
+#endif
 
 static struct i2c_board_info __initdata bmg_i2c_info = {
 	I2C_BOARD_INFO(BMG_DEV_NAME, BMI160_GYRO_I2C_ADDRESS)
@@ -276,17 +247,15 @@ static int bmg_i2c_write_block(struct i2c_client *client, u8 addr,
 	return err;
 }
 
-#if 0
-bool __attribute__((weak)) hwPowerOn(MT65XX_POWER powerId, MT65XX_POWER_VOLTAGE powerVolt, char *mode_name)
+bool __attribute__((weak)) gyro_hwPowerOn(MT65XX_POWER powerId, MT65XX_POWER_VOLTAGE powerVolt, char *mode_name)
 {
-	return 1;
+  return 1;
 }
 
-bool __attribute__((weak)) hwPowerDown(MT65XX_POWER powerId, char *mode_name)
+bool __attribute__((weak)) gyro_hwPowerDown(MT65XX_POWER powerId, char *mode_name)
 {
-	return 1;
+  return 1;
 }
-#endif
 
 static void bmg_power(struct gyro_hw *hw, unsigned int on)
 {
@@ -297,12 +266,12 @@ static void bmg_power(struct gyro_hw *hw, unsigned int on)
 		if (power_on == on) {/* power status not change */
 			GYRO_LOG("ignore power control: %d\n", on);
 		} else if (on) {/* power on */
-			if (!hwPowerOn(hw->power_id, hw->power_vol,
+			if (!gyro_hwPowerOn(hw->power_id, hw->power_vol,
 				BMG_DEV_NAME)) {
 				GYRO_ERR("power on failed\n");
 			}
 		} else {/* power off */
-			if (!hwPowerDown(hw->power_id, BMG_DEV_NAME))
+			if (!gyro_hwPowerDown(hw->power_id, BMG_DEV_NAME))
 				GYRO_ERR("power off failed\n");
 		}
 	}
@@ -311,8 +280,8 @@ static void bmg_power(struct gyro_hw *hw, unsigned int on)
 
 static int bmg_read_raw_data(struct i2c_client *client, s16 data[BMG_AXES_NUM])
 {
-	struct bmg_i2c_data *priv = obj_i2c_data;
-	int err = 0;
+    struct bmg_i2c_data *priv = i2c_get_clientdata(client);
+    int err = 0;
 
 	if (priv->power_mode == BMG_SUSPEND_MODE) {
 		err = bmg_set_powermode(client,
@@ -481,8 +450,8 @@ static int bmg_set_hw_offset(struct i2c_client *client,
 
 static int bmg_reset_calibration(struct i2c_client *client)
 {
-	struct bmg_i2c_data *obj = obj_i2c_data;
-	int err = 0;
+    struct bmg_i2c_data *obj = i2c_get_clientdata(client);
+    int err = 0;
 
 #ifdef SW_CALIBRATION
 
@@ -506,7 +475,7 @@ static int bmg_read_calibration(struct i2c_client *client,
 	*raw: the raw calibration data, unmapped;
 	*act: the actual calibration data, mapped
 	*/
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	int err = 0;
 	int mul;
 
@@ -543,7 +512,7 @@ static int bmg_write_calibration(struct i2c_client *client,
 	int dat[BMG_AXES_NUM])
 {
 	/* dat array : Android coordinate system, mapped, unit:LSB */
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	int err = 0;
 	int cali[BMG_AXES_NUM], raw[BMG_AXES_NUM];
 
@@ -629,7 +598,7 @@ static int bmg_get_chip_type(struct i2c_client *client)
 {
 	int err = 0;
 	u8 chip_id = 0;
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	GYRO_FUN(f);
 
 	/* twice */
@@ -665,7 +634,7 @@ static int bmg_get_chip_type(struct i2c_client *client)
 static int bmg_set_powermode(struct i2c_client *client,
 		enum BMG_POWERMODE_ENUM power_mode)
 {
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	u8 err = 0, data = 0, actual_power_mode = 0;
 
 	GYRO_LOG("[%s] power_mode = %d, old power_mode = %d\n",
@@ -705,7 +674,7 @@ static int bmg_set_powermode(struct i2c_client *client,
 
 static int bmg_set_range(struct i2c_client *client, enum BMG_RANGE_ENUM range)
 {
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	u8 err = 0, data = 0, actual_range = 0;
 
 	GYRO_LOG("[%s] range = %d, old range = %d\n",
@@ -778,7 +747,7 @@ static int bmg_set_range(struct i2c_client *client, enum BMG_RANGE_ENUM range)
 static int bmg_set_datarate(struct i2c_client *client,
 		int datarate)
 {
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	u8 err = 0, data = 0;
 
 	GYRO_LOG("[%s] datarate = %d, old datarate = %d\n",
@@ -813,7 +782,7 @@ static int bmg_selftest(struct i2c_client *client, u8 *result)
 	int err = 0 ;
 /* shall be finished later together with bmi160_acc */
 #if 0
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	u8 data1 = 0, data2 = 0;
 
 	err = bmg_set_powermode(client,
@@ -857,7 +826,7 @@ static int bmg_init_client(struct i2c_client *client, int reset_cali)
 {
 #ifdef CONFIG_BMG_LOWPASS
 	struct bmg_i2c_data *obj =
-		(struct bmg_i2c_data *)obj_i2c_data;
+		(struct bmg_i2c_data *)i2c_get_clientdata(client);
 #endif
 	int err = 0;
 	GYRO_FUN(f);
@@ -909,11 +878,12 @@ static int bmg_init_client(struct i2c_client *client, int reset_cali)
 static int bmg_read_sensor_data(struct i2c_client *client,
 		char *buf, int bufsize)
 {
-	struct bmg_i2c_data *obj =
-		(struct bmg_i2c_data *)obj_i2c_data;
-	s16 databuf[BMG_AXES_NUM];
-	int gyro[BMG_AXES_NUM];
-	int err = 0;
+    struct bmg_i2c_data *obj =
+        (struct bmg_i2c_data *)i2c_get_clientdata(client);
+    s16 databuf[BMG_AXES_NUM];
+    int gyro[BMG_AXES_NUM];
+    int err = 0;
+    static uint8_t bmi160_gyro_enable_flag = 0;  //shihaobin add read calibration data 20150330
 
 	memset(databuf, 0, sizeof(s16)*BMG_AXES_NUM);
 	memset(gyro, 0, sizeof(int)*BMG_AXES_NUM);
@@ -925,6 +895,14 @@ static int bmg_read_sensor_data(struct i2c_client *client,
 		*buf = 0;
 		return -2;
 	}
+
+	//shihaobin add for read calibration data when first enable sensor begin 20150330
+	if (0 == bmi160_gyro_enable_flag)
+	{
+		bmi160_gyro_enable_flag = 1;
+		yulong_gyro_ReadCalibration(obj->client);
+	}
+	//shihaobin add for read calibration data when first enable sensor end 20150330
 
 	err = bmg_read_raw_data(client, databuf);
 	if (err) {
@@ -1100,7 +1078,7 @@ static ssize_t show_firlen_value(struct device_driver *ddri, char *buf)
 {
 #ifdef CONFIG_BMG_LOWPASS
 	struct i2c_client *client = bmg222_i2c_client;
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	if (atomic_read(&obj->firlen)) {
 		int idx, len = atomic_read(&obj->firlen);
 		GYRO_LOG("len = %2d, idx = %2d\n", obj->fir.num, obj->fir.idx);
@@ -1132,7 +1110,7 @@ static ssize_t store_firlen_value(struct device_driver *ddri,
 {
 #ifdef CONFIG_BMG_LOWPASS
 	struct i2c_client *client = bmg222_i2c_client;
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	int firlen;
 
 	if (1 != sscanf(buf, "%d", &firlen)) {
@@ -1181,7 +1159,7 @@ static ssize_t store_trace_value(struct device_driver *ddri,
 	if (1 == sscanf(buf, "0x%x", &trace))
 		atomic_set(&obj->trace, trace);
 	else
-		GYRO_ERR("invalid content: '%s', length = %d\n", buf, count);
+		GYRO_ERR("invalid content: '%s', length = %lu\n", buf, count);
 
 	return count;
 }
@@ -1527,6 +1505,116 @@ static int bmg_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+//shihaobin add for sensor calibration begin 20150330
+static int yulong_gyro_Calibration(struct i2c_client *client, char *buf, int bufsize,int count,unsigned long cal_arg)
+{
+    int ret = 0;
+    //char databuf[6];
+    char i;
+    //int data[3];
+    //char tmp[1];
+    int cali[3];
+    long xavg = 0, yavg = 0, zavg = 0;
+    char tempbuf[NAND_FLASH_WR_RD_SIZE];
+    struct gyro_offset gyro_cal_data;
+    struct gyro_offset *gyro_cal_ptr = &gyro_cal_data;
+    //add end
+    struct bmg_i2c_data *obj = i2c_get_clientdata(client);
+
+    char strbuf[BMG_BUFSIZE] = {0};
+
+    for (i = 0; i < count; i++)
+    {
+        bmg_read_sensor_data(client, strbuf, BMG_BUFSIZE);
+
+        xavg += strbuf[BMG_AXIS_X];
+        yavg += strbuf[BMG_AXIS_Y];
+        zavg += strbuf[BMG_AXIS_Z];
+    }
+
+    cali[BMG_AXIS_X] = xavg/count;
+    cali[BMG_AXIS_Y] = yavg/count;
+    cali[BMG_AXIS_Z] = zavg/count;
+
+    cali[BMG_AXIS_X] = -cali[BMG_AXIS_X];
+    cali[BMG_AXIS_Y] = -cali[BMG_AXIS_Y];
+    cali[BMG_AXIS_Z] = -cali[BMG_AXIS_Z];
+
+    ret = bmg_write_calibration(client, cali);
+
+    printk("GYRO fwq GSENSOR_IOCTL_SET_CALI!!obj->sensitivity = %d,cali[BMG_AXIS_X] =%d,scali[BMG_AXIS_X] =%d,cali[BMG_AXIS_X] =%d \n",obj->sensitivity,cali[BMG_AXIS_X],cali[BMG_AXIS_Y],cali[BMG_AXIS_Z]);
+
+    ((struct gyro_offset *)gyro_cal_ptr)->x = obj->cali_sw[BMG_AXIS_X];
+    ((struct gyro_offset *)gyro_cal_ptr)->y = obj->cali_sw[BMG_AXIS_Y];
+    ((struct gyro_offset *)gyro_cal_ptr)->z = obj->cali_sw[BMG_AXIS_Z];
+    ((struct gyro_offset *)gyro_cal_ptr)->key = ret ? 2 : 1;
+
+    printk("GYRO(%d),obj->cali_sw[BMG_AXIS_X] is %d,obj->cali_sw[BMG_AXIS_Y] is %d,obj->cali_sw[BMG_AXIS_Z] is %d\n",
+        __LINE__,obj->cali_sw[BMG_AXIS_X],obj->cali_sw[BMG_AXIS_Y],obj->cali_sw[BMG_AXIS_Z]);
+
+    printk(KERN_INFO "%s write: x = %d\n",  __func__, ((struct gyro_offset *)gyro_cal_ptr)->x);
+    printk(KERN_INFO "%s write: y = %d\n",  __func__, ((struct gyro_offset *)gyro_cal_ptr)->y);
+    printk(KERN_INFO "%s write: z = %d\n",  __func__,((struct gyro_offset *)gyro_cal_ptr)->z);
+    printk(KERN_INFO "%s write: key = %d\n",  __func__,((struct gyro_offset *)gyro_cal_ptr)->key);
+
+    memset(tempbuf, 0, sizeof(tempbuf));
+
+    tempbuf[0]=0x01;
+    tempbuf[1] =  (obj->cali_sw[BMG_AXIS_X] & 0xff00) >> 8;
+    tempbuf[2] = obj->cali_sw[BMG_AXIS_X] & 0x00ff;
+    tempbuf[3] = (obj->cali_sw[BMG_AXIS_Y] & 0xff00) >> 8;
+    tempbuf[4] = obj->cali_sw[BMG_AXIS_Y] & 0x00ff;
+    tempbuf[5] = (obj->cali_sw[BMG_AXIS_Z] & 0xff00) >> 8;
+    tempbuf[6] = obj->cali_sw[BMG_AXIS_Z] & 0x00ff;
+
+    if(copy_to_user((struct gyro_offset *)cal_arg, gyro_cal_ptr, sizeof(gyro_cal_data)))
+    {
+        printk("%s:  Calibrate copy_to_user failed!\n", __func__);
+    }
+
+    printk("yl_sensor_debug_write_gyro_cal_data  %s\n", __func__);
+    if(write_acc_ps_cal_data_to_flash(32, tempbuf, NAND_FLASH_WR_RD_SIZE)<0)
+        printk("Create GYRO calibration file error!!");
+    else
+        printk("Create GYRO  calibration file Success!!");
+
+    return ret;
+}
+
+
+static int yulong_gyro_ReadCalibration(struct i2c_client *client)
+{
+    char tempbuf[NAND_FLASH_WR_RD_SIZE];
+    //char i;
+    struct bmg_i2c_data *obj = i2c_get_clientdata(client);
+
+    printk("yl_sensor_debug in yulong gyro_read_calibration!\n");
+
+    if(read_acc_ps_cal_data_from_flash(32, tempbuf, NAND_FLASH_WR_RD_SIZE)<0){
+        printk("GYRO use Default CALI , cali_sw[BMG_AXIS_X] = %d , cali_sw[BMG_AXIS_Y] = %d, cali_sw[BMG_AXIS_Z] = %d\n",
+        obj->cali_sw[BMG_AXIS_X],obj->cali_sw[BMG_AXIS_Y],obj->cali_sw[BMG_AXIS_Z]);
+    }
+    else{
+        if (NULL == obj)
+        {
+            printk("yl_sensor_debug %s cali_sw is NULL\n", __func__);
+            return 1;
+        }
+        obj->cali_sw[BMG_AXIS_X] = (s16)((tempbuf[1]<<8)|tempbuf[2]);
+        obj->cali_sw[BMG_AXIS_Y] = (s16)((tempbuf[3]<<8)|tempbuf[4]);
+        obj->cali_sw[BMG_AXIS_Z] = (s16)((tempbuf[5]<<8)|tempbuf[6]);
+
+        printk("GYRO use yulong CALI ,tempbuf is %d,%d,%d,%d,%d,%d,%d ",
+            tempbuf[0],tempbuf[1],tempbuf[2],tempbuf[3],tempbuf[4],tempbuf[5],tempbuf[6]);
+
+        printk("GYRO use yulong CALI , cali_sw[BMG_AXIS_X] = %d , cali_sw[BMG_AXIS_Y] = %d, cali_sw[BMG_AXIS_Z] = %d\n",
+            obj->cali_sw[BMG_AXIS_X],obj->cali_sw[BMG_AXIS_Y],obj->cali_sw[BMG_AXIS_Z]);
+
+    }
+    return 1;
+}
+//shihaobin add for sensor calibration end 20150330
+
 static long bmg_unlocked_ioctl(struct file *file, unsigned int cmd,
 		unsigned long arg)
 {
@@ -1556,74 +1644,80 @@ static long bmg_unlocked_ioctl(struct file *file, unsigned int cmd,
 	}
 
 	switch (cmd) {
-	case GYROSCOPE_IOCTL_INIT:
-	bmg_init_client(client, 0);
-	err = bmg_set_powermode(client, BMG_NORMAL_MODE);
-	if (err) {
-		err = -EFAULT;
-		break;
-	}
-	break;
-	case GYROSCOPE_IOCTL_READ_SENSORDATA:
-	data = (void __user *) arg;
-	if (data == NULL) {
-		err = -EINVAL;
-		break;
-	}
+		//shihaobin add for do acc-sensor calibrate begin 20150330
+		case GYRO_CALIBRATE:
+		    err = bmg_reset_calibration(client);
+		    yulong_gyro_Calibration(client, strbuf, BMG_BUFSIZE , 20, arg);
+		    //yulong_gyro_Calibration(client, strbuf, BMI160_BUFSIZE , 20);
+		    break;
+		//shihaobin add for do acc-sensor calibrate end 20150330
+		case GYROSCOPE_IOCTL_INIT:
+			bmg_init_client(client, 0);
+			err = bmg_set_powermode(client, BMG_NORMAL_MODE);
+			if (err) {
+				err = -EFAULT;
+				break;
+			}
+			break;
+		case GYROSCOPE_IOCTL_READ_SENSORDATA:
+			data = (void __user *) arg;
+			if (data == NULL) {
+				err = -EINVAL;
+				break;
+			}
+			bmg_read_sensor_data(client, strbuf, BMG_BUFSIZE);
+			if (copy_to_user(data, strbuf, strlen(strbuf) + 1)) {
+				err = -EFAULT;
+				break;
+			}
+			break;
+		case GYROSCOPE_IOCTL_SET_CALI:
+			/* data unit is degree/second */
+			data = (void __user *)arg;
+			if (data == NULL) {
+				err = -EINVAL;
+				break;
+			}
+			if (copy_from_user(&sensor_data, data, sizeof(sensor_data))) {
+				err = -EFAULT;
+				break;
+			}
+			if (atomic_read(&obj->suspend)) {
+				GYRO_ERR("perform calibration in suspend mode\n");
+				err = -EINVAL;
+			} else {
+				/* convert: degree/second -> LSB */
+				cali[BMG_AXIS_X] = sensor_data.x * obj->sensitivity;
+				cali[BMG_AXIS_Y] = sensor_data.y * obj->sensitivity;
+				cali[BMG_AXIS_Z] = sensor_data.z * obj->sensitivity;
+				err = bmg_write_calibration(client, cali);
+			}
+			break;
+		case GYROSCOPE_IOCTL_CLR_CALI:
+			err = bmg_reset_calibration(client);
+			break;
+		case GYROSCOPE_IOCTL_GET_CALI:
+			data = (void __user *)arg;
+			if (data == NULL) {
+				err = -EINVAL;
+				break;
+			}
+			err = bmg_read_calibration(client, cali, raw_offset);
+			if (err)
+				break;
 
-	bmg_read_sensor_data(client, strbuf, BMG_BUFSIZE);
-	if (copy_to_user(data, strbuf, strlen(strbuf) + 1)) {
-		err = -EFAULT;
-		break;
-	}
-	break;
-	case GYROSCOPE_IOCTL_SET_CALI:
-	/* data unit is degree/second */
-	data = (void __user *)arg;
-	if (data == NULL) {
-		err = -EINVAL;
-		break;
-	}
-	if (copy_from_user(&sensor_data, data, sizeof(sensor_data))) {
-		err = -EFAULT;
-		break;
-	}
-	if (atomic_read(&obj->suspend)) {
-		GYRO_ERR("perform calibration in suspend mode\n");
-		err = -EINVAL;
-	} else {
-		/* convert: degree/second -> LSB */
-		cali[BMG_AXIS_X] = sensor_data.x * obj->sensitivity;
-		cali[BMG_AXIS_Y] = sensor_data.y * obj->sensitivity;
-		cali[BMG_AXIS_Z] = sensor_data.z * obj->sensitivity;
-		err = bmg_write_calibration(client, cali);
-	}
-	break;
-	case GYROSCOPE_IOCTL_CLR_CALI:
-	err = bmg_reset_calibration(client);
-	break;
-	case GYROSCOPE_IOCTL_GET_CALI:
-	data = (void __user *)arg;
-	if (data == NULL) {
-		err = -EINVAL;
-		break;
-	}
-	err = bmg_read_calibration(client, cali, raw_offset);
-	if (err)
-		break;
-
-	sensor_data.x = cali[BMG_AXIS_X] * obj->sensitivity;
-	sensor_data.y = cali[BMG_AXIS_Y] * obj->sensitivity;
-	sensor_data.z = cali[BMG_AXIS_Z] * obj->sensitivity;
-	if (copy_to_user(data, &sensor_data, sizeof(sensor_data))) {
-		err = -EFAULT;
-		break;
-	}
-	break;
-	default:
-	GYRO_ERR("unknown IOCTL: 0x%08x\n", cmd);
-	err = -ENOIOCTLCMD;
-	break;
+			sensor_data.x = cali[BMG_AXIS_X] * obj->sensitivity;
+			sensor_data.y = cali[BMG_AXIS_Y] * obj->sensitivity;
+			sensor_data.z = cali[BMG_AXIS_Z] * obj->sensitivity;
+			if (copy_to_user(data, &sensor_data, sizeof(sensor_data))) {
+				err = -EFAULT;
+				break;
+			}
+			break;
+		default:
+			GYRO_ERR("unknown IOCTL: 0x%08x\n", cmd);
+			err = -ENOIOCTLCMD;
+			break;
 	}
 
 	return err;
@@ -1642,7 +1736,6 @@ static struct miscdevice bmg_device = {
 	.fops = &bmg_fops,
 };
 
-#ifndef CONFIG_HAS_EARLYSUSPEND
 static int bmg_suspend(struct i2c_client *client, pm_message_t msg)
 {
 	struct bmg_i2c_data *obj = obj_i2c_data;
@@ -1669,7 +1762,7 @@ static int bmg_suspend(struct i2c_client *client, pm_message_t msg)
 
 static int bmg_resume(struct i2c_client *client)
 {
-	struct bmg_i2c_data *obj = obj_i2c_data;
+	struct bmg_i2c_data *obj = i2c_get_clientdata(client);
 	int err;
 	GYRO_FUN();
 
@@ -1688,49 +1781,6 @@ static int bmg_resume(struct i2c_client *client)
 	atomic_set(&obj->suspend, 0);
 	return 0;
 }
-#else
-static void bmi160_gyro_early_suspend(struct early_suspend *h)
-{
-	struct bmg_i2c_data *obj = obj_i2c_data;
-	int err = 0;
-	GYRO_FUN();
-
-	if (obj == NULL) {
-		GYRO_ERR("null pointer\n");
-		return;
-	}
-
-	atomic_set(&obj->suspend, 1);
-	err = bmg_set_powermode(obj->client, BMG_SUSPEND_MODE);
-	if (err) {
-		GYRO_ERR("bmg set suspend mode failed, err = %d\n",err);
-		return;
-	}
-	bmg_power(obj->hw, 0);
-	return;
-}
-static void bmi160_gyro_late_resume(struct early_suspend *h)
-{
-	struct bmg_i2c_data *obj = obj_i2c_data;
-	int err;
-	GYRO_FUN();
-
-	if (obj == NULL) {
-		GYRO_ERR("null pointer\n");
-		return;
-	}
-
-	bmg_power(obj->hw, 1);
-	err = bmg_init_client(obj->client, 0);
-	if (err) {
-		GYRO_ERR("initialize client failed, err = %d\n", err);
-		return;
-	}
-
-	atomic_set(&obj->suspend, 0);
-	return;
-}
-#endif/*CONFIG_HAS_EARLYSUSPEND*/
 
 static int bmg_i2c_detect(struct i2c_client *client,
 		struct i2c_board_info *info)
@@ -1738,6 +1788,10 @@ static int bmg_i2c_detect(struct i2c_client *client,
 	strcpy(info->type, BMG_DEV_NAME);
 	return 0;
 }
+
+//shihaobin@yulong.com add for recognize device begin 20150409
+#define BMI160_DEVICE_ID_ADDRESS    0x00
+#define BMI160_DEVICE_ID_VALUE      0xD1
 
 // if use  this typ of enable , Gsensor should report inputEvent(x, y, z ,stats, div) to HAL
 static int bmi160_gyro_open_report_data(int open)
@@ -1814,6 +1868,32 @@ static int bmi160_gyro_set_delay(u64 ns)
 
 	/* wake up the wait queue */
 	wake_up(&uplink_event_flag_wq);
+#else
+	int err;
+	int value = (int)ns/1000/1000 ;
+	/* Currently, fix data rate to 100Hz. */
+	int sample_delay = BMI160_GYRO_ODR_100HZ;
+	struct bmg_i2c_data *priv = obj_i2c_data;
+
+	GYRO_LOG("sensor delay command: %d, sample_delay = %d\n",
+	      value, sample_delay);
+
+	err = bmg_set_datarate(priv->client, sample_delay);
+	if (err < 0)
+		GYRO_ERR("set delay parameter error\n");
+
+	if (value >= 40)
+		atomic_set(&priv->filter, 0);
+	else {
+#if defined(CONFIG_BMG_LOWPASS)
+	priv->fir.num = 0;
+	priv->fir.idx = 0;
+	priv->fir.sum[BMG_AXIS_X] = 0;
+	priv->fir.sum[BMG_AXIS_Y] = 0;
+	priv->fir.sum[BMG_AXIS_Z] = 0;
+	atomic_set(&priv->filter, 1);
+#endif
+  }
 #endif
 
 	return 0;
@@ -1853,7 +1933,16 @@ static int bmg_i2c_probe(struct i2c_client *client,
 	struct hwmsen_object sobj;
 	struct gyro_control_path ctl={0};
 	struct gyro_data_path data={0};
+
 	int err = 0;
+
+	//shihaobin@yulong.com add for recognize device begin 20150409
+	u8 beg = BMI160_DEVICE_ID_ADDRESS;
+	u8 device_id = 0;
+	int read_device_id_err = 0;
+	client->addr = 0x68;
+	//shihaobin@yulong.com add for recognize device end 20150409
+
 	GYRO_FUN();
 
 	obj = kzalloc(sizeof(*obj), GFP_KERNEL);
@@ -1862,12 +1951,49 @@ static int bmg_i2c_probe(struct i2c_client *client,
 		goto exit;
 	}
 
-	obj->hw = get_cust_gyro_hw();
+	obj->hw = bmi160_get_cust_gyro_hw();
 	err = hwmsen_get_convert(obj->hw->direction, &obj->cvt);
 	if (err) {
 		GYRO_ERR("invalid direction: %d\n", obj->hw->direction);
 		goto exit_hwmsen_get_convert_failed;
 	}
+
+	//shihaobin@yulong.com add for recognize device begin 20150409
+	if (!client)
+	{
+		return -EINVAL;
+	}
+
+    struct i2c_msg msgs[2] = {
+        {
+            .addr = client->addr,   .flags = 0,
+            .len = 1,               .buf = &beg
+        },
+        {
+            .addr = client->addr,   .flags = I2C_M_RD,
+            .len = 1,               .buf = &device_id
+        }
+    };
+
+    read_device_id_err = i2c_transfer(client->adapter, msgs, sizeof(msgs)/sizeof(msgs[0]));
+
+    printk("yl_sensor_debug %s read_device_id_err = %d device_id=%d\n", __func__, read_device_id_err,device_id);
+
+    if (read_device_id_err != 2) {
+        GYRO_ERR("yl_sensor_debug i2c_transfer error: %d\n", read_device_id_err);
+        err = -ENOMEM;
+        goto exit;
+    } else {
+        if (BMI160_DEVICE_ID_VALUE != device_id)
+        {
+            GYRO_ERR("yl_sensor_debug This is not bmi160 device, device_id = %d\n", device_id);
+            err = -ENOMEM;
+            goto exit;
+        }
+    }
+    //shihaobin@yulong.com add for recognize device end 20150409
+
+
 
 	obj_i2c_data = obj;
 	obj->client = bmi160_acc_i2c_client;
@@ -1911,6 +2037,8 @@ static int bmg_i2c_probe(struct i2c_client *client,
 	ctl.enable_nodata = bmi160_gyro_enable_nodata;
 	ctl.set_delay  = bmi160_gyro_set_delay;
 	ctl.is_report_input_direct = false;
+  	ctl.is_support_batch = obj->hw->is_batch_supported;
+
 	err = gyro_register_control_path(&ctl);
 	if(err) {
 		GYRO_ERR("register gyro control path err\n");
@@ -1918,31 +2046,19 @@ static int bmg_i2c_probe(struct i2c_client *client,
 	}
 
 	data.get_data = bmi160_gyro_get_data;
+#ifdef USE_DAEMON
 	data.vender_div = DEGREE_TO_RAD;
+#else
+	data.vender_div = 57;
+#endif
 	err = gyro_register_data_path(&data);
 	if(err) {
 		GYRO_ERR("gyro_register_data_path fail = %d\n", err);
 		goto exit_kfree;
 	}
-
-	sobj.self = obj;
-	sobj.polling = 1;
-	sobj.sensor_operate = gyroscope_operate;
-/*
-	err = hwmsen_attach(ID_GYROSCOPE, &sobj);
-	if (err) {
-		GYRO_ERR("hwmsen attach failed, err = %d\n", err);
-		goto exit_hwmsen_attach_failed;
-	}
-*/
-
-#ifdef CONFIG_HAS_EARLYSUSPEND
-	obj->early_drv.level    = EARLY_SUSPEND_LEVEL_DISABLE_FB - 2,
-	obj->early_drv.suspend  = bmi160_gyro_early_suspend,
-	obj->early_drv.resume   = bmi160_gyro_late_resume,
-	register_early_suspend(&obj->early_drv);
-#endif
-	bmi160_gyro_init_flag =0;
+	//get_device_info(" GYRO: bmi160 BOSCH \n"); // liuxinyuan@yulong.com add for get device info 20150521
+	bmi160_gyro_init_flag = 0;
+	printk("yl_sensor_debug %s init OK.\n", __func__);
 	GYRO_LOG("%s: OK\n", __func__);
 	return 0;
 /*
@@ -1954,33 +2070,26 @@ exit_create_attr_failed:
 exit_misc_device_register_failed:
 exit_init_client_failed:
 exit_hwmsen_get_convert_failed:
+//shihaobin add here 20150410
 exit_kfree:
 	kfree(obj);
 exit:
-	bmi160_gyro_init_flag =-1;
-	GYRO_ERR("err = %d\n", err);
-	return err;
+	    GYRO_ERR("err = %d\n", err);
+	    bmi160_gyro_init_flag = -1;
+	    return err;
 }
 
 static int bmg_i2c_remove(struct i2c_client *client)
 {
 	int err = 0;
 
-/*
-	err = hwmsen_detach(ID_GYROSCOPE);
-	if (err)
-		GYRO_ERR("hwmsen_detach failed, err = %d\n", err);
-*/
-	//err = bmg_delete_attr(&bmg_gyroscope_driver.driver);
-	err = bmg_delete_attr(&bmi160_gyro_init_info.platform_diver_addr->driver);
-	if (err)
-		GYRO_ERR("bmg_delete_attr failed, err = %d\n", err);
+  err = bmg_delete_attr(&bmi160_gyro_init_info.platform_diver_addr->driver);
+  if (err)
+    GYRO_ERR("bmg_delete_attr failed, err = %d\n", err);
 
-#if 0
-	err = misc_deregister(&bmg_device);
-	if (err)
-		GYRO_ERR("misc_deregister failed, err = %d\n", err);
-#endif
+    err = misc_deregister(&bmg_device);
+    if (err)
+        GYRO_ERR("misc_deregister failed, err = %d\n", err);
 
 	obj_i2c_data = NULL;
 	i2c_unregister_device(client);
@@ -1996,62 +2105,24 @@ static struct i2c_driver bmg_i2c_driver = {
 	.probe = bmg_i2c_probe,
 	.remove	= bmg_i2c_remove,
 	.detect	= bmg_i2c_detect,
-#if !defined(CONFIG_HAS_EARLYSUSPEND)
 	.suspend = bmg_suspend,
 	.resume = bmg_resume,
-#endif
 	.id_table = bmg_i2c_id,
 };
 
-#if 0
-static int bmg_probe(struct platform_device *pdev)
-{
-	struct gyro_hw *hw = get_cust_gyro_hw();
-	GYRO_FUN();
-
-	bmg_power(hw, 1);
-	if (i2c_add_driver(&bmg_i2c_driver)) {
-		GYRO_ERR("add i2c driver failed\n");
-		return -1;
-	}
-
-	return 0;
-}
-
-static int bmg_remove(struct platform_device *pdev)
-{
-	struct gyro_hw *hw = get_cust_gyro_hw();
-	GYRO_FUN();
-
-	bmg_power(hw, 0);
-	i2c_del_driver(&bmg_i2c_driver);
-
-	return 0;
-}
-
-static struct platform_driver bmg_gyroscope_driver = {
-	.probe      = bmg_probe,
-	.remove     = bmg_remove,
-	.driver     = {
-		.name   = "gyroscope",
-		.owner  = THIS_MODULE,
-	}
-};
-#endif
-
 static int bmi160_gyro_remove(void)
 {
-    struct gyro_hw *hw = get_cust_gyro_hw();
-    GYRO_FUN();    
-    bmg_power(hw, 0);    
+    struct gyro_hw *hw = bmi160_get_cust_gyro_hw();
+    GYRO_FUN();
+    bmg_power(hw, 0);
     i2c_del_driver(&bmg_i2c_driver);
     return 0;
 }
 /*----------------------------------------------------------------------------*/
 static int bmi160_gyro_local_init(void)
 {
-    struct gyro_hw *hw = get_cust_gyro_hw();
-	GYRO_LOG("fwq loccal init+++\n");
+    struct gyro_hw *hw = bmi160_get_cust_gyro_hw();
+  GYRO_LOG("fwq loccal init+++\n");
 
 	bmg_power(hw, 1);
 	if(i2c_add_driver(&bmg_i2c_driver))
@@ -2075,7 +2146,7 @@ static struct gyro_init_info bmi160_gyro_init_info = {
 
 static int __init bmg_init(void)
 {
-	struct gyro_hw *hw = get_cust_gyro_hw();
+    struct gyro_hw *hw = bmi160_get_cust_gyro_hw();
 
 	GYRO_LOG("%s: bosch gyroscope driver version: %s\n",
 	__func__, BMG_DRIVER_VERSION);
@@ -2094,10 +2165,8 @@ static int __init bmg_init(void)
 
 static void __exit bmg_exit(void)
 {
-	GYRO_FUN();
-#if 0
-	platform_driver_unregister(&bmg_gyroscope_driver);
-#endif
+    GYRO_FUN();
+    //platform_driver_unregister(&bmg_gyroscope_driver);
 }
 
 module_init(bmg_init);
