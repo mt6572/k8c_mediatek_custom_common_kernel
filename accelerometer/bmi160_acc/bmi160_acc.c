@@ -49,7 +49,6 @@
 #include "bmi160_acc.h"
 #include <linux/hwmsen_helper.h>
 
-#include <linux/proc_fs.h>
 //shihaobin@yulong.com add for compitable begin 20150414
 #include <linux/batch.h>
 //shihaobin@yulong.com add for compitable end 20150414
@@ -76,7 +75,7 @@ static int yulong_acc_ReadCalibration(struct i2c_client *client);
 //tad3sgh add ++
 #define BMM050_DEFAULT_DELAY	100
 #define CALIBRATION_DATA_SIZE	12
-#define  STEP_SENSOR
+
 extern struct acc_hw* bmi160_get_cust_acc_hw(void); //shihaobin@yulong.com add for compatible 20150410
 
 /*----------------------------------------------------------------------------*/
@@ -738,21 +737,11 @@ static int BMI160_ACC_CheckDeviceID(struct i2c_client *client)
 }
 
 /*----------------------------------------------------------------------------*/
-#ifdef STEP_SENSOR
-bool step_power = false;
-#endif
 static int BMI160_ACC_SetPowerMode(struct i2c_client *client, bool enable)
 {
 	u8 databuf[2] = {0};
 	int res = 0;
 	struct bmi160_acc_i2c_data *obj = obj_i2c_data;
-#ifdef STEP_SENSOR
-       if(step_power )
-	{
-		GSE_LOG("Sensor power status is newest!\n");
-		return BMI160_ACC_SUCCESS;
-	}
-#endif	   
 	if(enable == sensor_power )
 	{
 		GSE_LOG("Sensor power status is newest!\n");
@@ -912,75 +901,6 @@ static int BMI160_ACC_SetIntEnable(struct i2c_client *client, u8 intenable)
 	return BMI160_ACC_SUCCESS;
 }
 
-#ifdef STEP_SENSOR
-//heyong add reset ic
-#define IC_MODEM_SWITCH_PROC_NAME "steps_reset"
- #define IC_PROC_NAME "stepsreset"
- int steps_reset = 0;
- static int reset_read(char *buf, char **start, off_t off, int count, int *eof, void *data)
-{
-    int len = 0;
-    char *p = buf;
-    
-    p += sprintf(p, "%d\n", steps_reset);
-    
-    *start = buf + off;
-    
-    len = p - buf;
-    if (len > off)
-        len -= off;
-    else
-        len = 0;
-    
-    return len < count ? len  : count;
-}
- 
-static int reset_write(struct file *file, const char *buffer, unsigned long count, void *data)
-{
-	char tmp_buf[11] = {0};
-	uint32_t copysize;
-	int write_data = 0;
-	copysize = (count < (sizeof(tmp_buf) - 1)) ? count : (sizeof(tmp_buf) - 1);
-	if (copy_from_user(tmp_buf, buffer, copysize)) {
-        return -EFAULT;
-    }
-
-	if (sscanf(tmp_buf, "%d", &write_data) != 1) {
-		return -EFAULT;
-	}
-     
-	  steps_reset = write_data;
-	return count;
-}
-
- void reset_ic(void)
- {    
-    int ret_device_file = 0;
-    struct proc_dir_entry *entry = NULL;
-    struct proc_dir_entry *step_dir = NULL;
-    
-    step_dir = proc_mkdir(IC_PROC_NAME, NULL);
-    if (!step_dir)
-    {
-       
-       //printk("bmi160 step === failed");
-    }
-    else
-    {
-       
-       entry = create_proc_entry(IC_MODEM_SWITCH_PROC_NAME, 0777, step_dir);
-        if (entry)
-        {
-            entry->read_proc = reset_read;
-            entry->write_proc = reset_write;
-        }
-    }   
-}
-
- 
-//heyong end
-#endif
-
 /*----------------------------------------------------------------------------*/
 static int bmi160_acc_init_client(struct i2c_client *client, int reset_cali)
 {
@@ -993,9 +913,6 @@ static int bmi160_acc_init_client(struct i2c_client *client, int reset_cali)
 	{
 		return res;
 	}
-#ifdef STEP_SENSOR
-	reset_ic();
-#endif
 	GSE_LOG("BMI160_ACC_CheckDeviceID ok \n");
 
 	res = BMI160_ACC_SetBWRate(client, BMI160_ACCEL_ODR_200HZ);
@@ -1154,7 +1071,7 @@ static int yulong_accel_Calibration(struct i2c_client *client, char *buf, int bu
 		//add end
 	#ifdef STEP_SENSOR
 	reset_ic();
-	#endif	//struct bmi160_acc_i2c_data *obj = i2c_get_clientdata(client);
+#endif	//struct bmi160_acc_i2c_data *obj = i2c_get_clientdata(client);
 
 		BMI160_ACC_SetPowerMode(client, true);
 		msleep(50);
@@ -2608,24 +2525,7 @@ static ssize_t store_layout_value(struct device_driver *ddri, const char *buf, s
 
 	return count;
 }
-#ifdef STEP_SENSOR
-///heyong 
-static int Step_SetPowerMode(struct i2c_client *client, bool enable);
-static ssize_t show_stepsreset_value(struct device_driver *ddri, char *buf)
-{
-	return 0;
-}
-/*----------------------------------------------------------------------------*/
-int  m_is_reset = 0;
-static ssize_t store_stepsreset_value(struct device_driver *ddri, const char *buf, size_t count)
-{
-	struct i2c_client *client = bmi160_acc_i2c_client;       
-	printk("store_stepsreset_value = %s\n", buf);
-	m_is_reset =1;
-       Step_SetPowerMode(client,false);	
-	return count;
-}
-#endif
+
 /*----------------------------------------------------------------------------*/
 static DRIVER_ATTR(chipinfo,   S_IWUSR | S_IRUGO, show_chipinfo_value,      NULL);
 static DRIVER_ATTR(cpsdata, 	 S_IWUSR | S_IRUGO, show_cpsdata_value,    NULL);
@@ -2643,7 +2543,6 @@ static DRIVER_ATTR(fifo_bytecount, S_IRUGO | S_IWUSR, bmi160_fifo_bytecount_show
 static DRIVER_ATTR(fifo_data_sel, S_IRUGO | S_IWUSR, bmi160_fifo_data_sel_show, bmi160_fifo_data_sel_store);
 static DRIVER_ATTR(fifo_data_frame, S_IRUGO, bmi160_fifo_data_out_frame_show, NULL);
 static DRIVER_ATTR(layout,      S_IRUGO | S_IWUSR, show_layout_value, store_layout_value );
-static DRIVER_ATTR(stepsreset,      0777, show_stepsreset_value,         store_stepsreset_value);
 /*----------------------------------------------------------------------------*/
 static struct driver_attribute *bmi160_acc_attr_list[] = {
 	&driver_attr_chipinfo,     /*chip information*/
@@ -2662,7 +2561,6 @@ static struct driver_attribute *bmi160_acc_attr_list[] = {
 	&driver_attr_fifo_data_sel,
 	&driver_attr_fifo_data_frame,
 	&driver_attr_layout,
-	&driver_attr_stepsreset,
 };
 /*----------------------------------------------------------------------------*/
 static int bmi160_acc_create_attr(struct device_driver *driver)
@@ -2702,236 +2600,6 @@ static int bmi160_acc_delete_attr(struct device_driver *driver)
 
 	return err;
 }
-
-//
-
-#ifdef STEP_SENSOR
-static int Step_init(struct i2c_client *client)
-{             
-		int res = 0;
-	printk(" heyong Step_init = %d\n", res);
-		res = hwmsen_write_byte(client, 0x7e, 0x11);//12 low power 11 normal
-		if(res != 0) 
-		{
-			return res;
-		}
-		mdelay(100);
-		res = hwmsen_write_byte(client, 0x7a, 0x15);
-		if(res != 0) 
-		{
-			return res;
-		}
-		mdelay(100);
-		res = hwmsen_write_byte(client, 0x7b, 0x0b);
-		if(res != 0) 
-		{
-			return res;
-		}
-		mdelay(100);
-		
-		return 0;	  
-}
-
-
-static int Step_SetPowerMode(struct i2c_client *client, bool enable)
-{
-	u8 databuf[2];    
-	int res = 0;
-	u8 addr = 0x11;
-	struct bmi160_acc_i2c_data *obj = obj_i2c_data;
-	
-	printk("heyong qma8961  set power %d,%d,%d ,%d\n ",enable,step_power,steps_reset,m_is_reset);
-
-	if(steps_reset)
-	     enable = false;
-	else
-	     enable = true;
-		///return 0;
-	if(m_is_reset)
-	{
-	 enable = false;
-	 m_is_reset = 0;
-	}
-	if(enable == step_power )
-	{
-		GSE_LOG("Sensor power status is newest!\n");
-		return 0;
-	}
-
-	//init step
-	step_power = enable;
-
-	
-if (enable)
-{
-	
-	Step_init(client);
-	
-}
-else
-{ //disable step
- res = hwmsen_write_byte(client, 0x7e, 0xb2); //clean data
-		if(res != 0) 
-		{
-			return res;
-		}
-	mdelay(100);	
-res = hwmsen_write_byte(client, 0x7e, 0x10); //closed
-		if(res != 0) 
-		{
-			return res;
-		}
-	mdelay(100);	
-  
-   
-}
-		
-	
-	return -1;    
-}
-
-
-static int Step_ReadSensorData(struct i2c_client *client, char *buf, int bufsize)
-{
-	//struct bma250_i2c_data *obj = (struct bma250_i2c_data*)i2c_get_clientdata(client);
-	struct bmi160_acc_i2c_data *obj = obj_i2c_data;
-	u8 databuf[20];
-	u8 buf_step[6] = {0};
-	int res = 0;
-	s16 steps = 0;
-	memset(databuf, 0, sizeof(u8)*10);
-
-	if(NULL == buf)
-	{
-		return -1;
-	}
-	if(NULL == client)
-	{
-		*buf = 0;
-		return -2;
-	}
-       if(steps_reset)
-       {
-         res = Step_SetPowerMode(client, false);
-		if(res)
-		{
-			GSE_ERR("Power on bma250 error %d!\n", res);
-		}
-       }
-	if(step_power == FALSE)
-	{
-		res = Step_SetPowerMode(client, true);
-		if(res)
-		{
-			GSE_ERR("Power on bma250 error %d!\n", res);
-		}
-	}
-
-	if((res = hwmsen_read_block(client, 0x78, buf_step, 0x02)))
-	{
-		GSE_ERR("error: %d\n", res);
-	}
-	else
-	{
-	
-	     steps = (s16)((buf_step[1]<<8) |( buf_step[0]));
-	   printk("heyong qma8961  get sensot steps ===== %d \n ",steps);
-	   sprintf(buf, "%08x", steps);
-	}
-	
-	return 0;
-}
-
-int kk =0;
-int step_operate(void* self, uint32_t command, void* buff_in, int size_in,
-		void* buff_out, int size_out, int* actualout)
-{
-	int err = 0;
-	int value, sample_delay;	
-	struct bmi160_acc_i2c_data *priv = (struct bmi160_acc_i2c_data*)self;
-	hwm_sensor_data* step_data;
-	char buff[BMI160_BUFSIZE];
-
-	printk(" heyong step_operate = %d\n", command);
-	//GSE_FUN(f);
-	switch (command)
-	{
-		case SENSOR_DELAY:
-			if((buff_in == NULL) || (size_in < sizeof(int)))
-			{
-				GSE_ERR("Set delay parameter error!\n");
-				err = -EINVAL;
-			}
-			else
-			{
-				err = 0;
-			}
-			break;
-
-		case SENSOR_ENABLE:
-			if((buff_in == NULL) || (size_in < sizeof(int)))
-			{
-				GSE_ERR("Enable sensor parameter error!\n");
-				err = -EINVAL;
-			}
-			else
-			{
-				value = *(int *)buff_in;
-				if(value)
-				{
-				printk(" heyong step_operate  1111= %d\n", command);
-				err = Step_SetPowerMode( priv->client, true);
-				}
-				else
-				{
-				 printk(" heyong step_operate  2222= %d\n", command);
-				 err = Step_SetPowerMode( priv->client, false);
-				}
-				/*if(((value == 0) && (step_power == false)) ||((value == 1) && (step_power == true)))
-				{
-					GSE_LOG("Gsensor device have updated!\n");
-				}
-				else
-				{
-					err = Step_SetPowerMode( priv->client, !step_power);
-				}*/
-			}
-			break;
-
-		case SENSOR_GET_DATA:
-			if((buff_out == NULL) || (size_out< sizeof(hwm_sensor_data)))
-			{
-				GSE_ERR("get sensor data parameter error!\n");
-				err = -EINVAL;
-			}
-			else
-			{
-				step_data = (hwm_sensor_data *)buff_out;
-				Step_ReadSensorData(priv->client, buff, BMI160_BUFSIZE);
-				//sscanf(buff, "%x %x %x", &step_data->values[0], 
-					//&step_data->values[1], &step_data->values[2]);	
-				
-				sscanf(buff, "%x", &step_data->values[0]);
-				printk("qma8961  get sensot steps  2222222===== %d \n ",step_data->values[0]);
-				//step_data->values[0] = kk+1000;
-				//kk++;
-				
-		                 //step_data->values[1] = step_data->values[2] = 1;
-				step_data->status = SENSOR_STATUS_ACCURACY_MEDIUM;				
-				step_data->value_divide = 1;
-			}
-			break;
-		default:
-			GSE_ERR("gsensor operate function no this parameter %d!\n", command);
-			err = -1;
-			break;
-	}
-	
-	return err;
-}
-#endif
-
-//
 
 /*----------------------------------------------------------------------------*/
 int gsensor_operate(void* self, uint32_t command, void* buff_in, int size_in,
@@ -3414,10 +3082,6 @@ static int bmi160_acc_suspend(struct i2c_client *client, pm_message_t msg)
 	int err = 0;
 
 	GSE_FUN();
-#ifdef STEP_SENSOR
-         if(step_power)
-		return 0;
-#endif
 	if(msg.event == PM_EVENT_SUSPEND)
 	{
 		if(obj == NULL)
@@ -3474,10 +3138,6 @@ static int bmi160_acc_resume(struct i2c_client *client)
 	int err;
 
 	GSE_FUN();
-#ifdef STEP_SENSOR
-         if(step_power)
-		return 0;
-#endif
 	if(obj == NULL)
 	{
 		GSE_ERR("null pointer!!\n");
@@ -3535,10 +3195,6 @@ static void bmi160_acc_early_suspend(struct early_suspend *h)
 	int err;
 
 	GSE_FUN();
-#ifdef STEP_SENSOR
-         if(step_power)
-		return 0;
-#endif
 	if(obj == NULL)
 	{
 		GSE_ERR("null pointer!!\n");
@@ -3592,10 +3248,6 @@ static void bmi160_acc_late_resume(struct early_suspend *h)
 	int err;
 
 	GSE_FUN();
-#ifdef STEP_SENSOR
-         if(step_power)
-		return 0;
-#endif
 	if(obj == NULL)
 	{
 		GSE_ERR("null pointer!!\n");
@@ -3898,7 +3550,7 @@ static int bmi160_acc_i2c_probe(struct i2c_client *client, const struct i2c_devi
 {
 	struct i2c_client *new_client;
 	struct bmi160_acc_i2c_data *obj;
-	struct hwmsen_object sobj,stepobj;
+	struct hwmsen_object sobj;
 	struct acc_control_path ctl={0};
 	struct acc_data_path data={0};
 	char strbuf[BMI160_BUFSIZE]; //shihaobin add for debug
@@ -4048,17 +3700,6 @@ static int bmi160_acc_i2c_probe(struct i2c_client *client, const struct i2c_devi
 		goto exit_kfree;
 	}
 
-#ifdef  STEP_SENSOR
-    stepobj.self = obj;
-    stepobj.polling = 1;
-    stepobj.sensor_operate = step_operate;
-	if((err = hwmsen_attach(ID_STEP_COUNTER, &stepobj)))
-	{
-		GSE_ERR("attach fail = %d\n", err);
-		goto exit_kfree;
-	}
-#endif	
-
 //tad3sgh add --
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	obj->early_drv.level    = EARLY_SUSPEND_LEVEL_DISABLE_FB - 1,
@@ -4100,10 +3741,7 @@ static int bmi160_acc_i2c_probe(struct i2c_client *client, const struct i2c_devi
 static int bmi160_acc_i2c_remove(struct i2c_client *client)
 {
 	int err = 0;
-#ifdef  STEP_SENSOR
-   if(step_power)
-   	return 0;
-#endif
+
 	err = bmi160_acc_delete_attr(&(bmi160_acc_init_info.platform_diver_addr->driver));
 	if(err) {
 		GSE_ERR("bma150_delete_attr fail: %d\n", err);
@@ -4154,10 +3792,6 @@ static int bmi160_acc_remove(void)
 	struct acc_hw *hw = bmi160_get_cust_acc_hw();
 
 	GSE_FUN();
-#ifdef  STEP_SENSOR
-   if(step_power)
-   	return 0;
-#endif
 	BMI160_ACC_power(hw, 0);
 	i2c_del_driver(&bmi160_acc_i2c_driver);
 	return 0;
